@@ -261,6 +261,8 @@ const feedBackDesktopApi = {
             ipcRenderer.invoke('audio:setMonitorMuteSuppressed', suppressed),
         isMonitorMuted: () => ipcRenderer.invoke('audio:isMonitorMuted'),
         setMonitorKill: (kill: boolean) => ipcRenderer.invoke('audio:setMonitorKill', kill),
+        setDropTuneSemitones: (semitones: number) => ipcRenderer.invoke('audio:setDropTuneSemitones', semitones),
+        getDropTuneSemitones: () => ipcRenderer.invoke('audio:getDropTuneSemitones'),
         setNoiseGate: (payload: {
             enabled: boolean;
             thresholdDb: number;

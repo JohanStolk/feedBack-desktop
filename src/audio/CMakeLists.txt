@@ -5,6 +5,7 @@ set(AUDIO_SOURCES
     NodeAddon.cpp
     NoiseGate.cpp
     TonePolish.cpp
+    DropTuner.cpp
     AudioEngine.cpp
     engine/StreamSink.cpp
     engine/BackingPlayer.cpp

@@ -52,6 +52,20 @@
                 </label>
             </div>
             <div class="md:col-span-2">
+                <label for="ae-drop-tune" class="block text-xs text-slate-400 mb-1">Virtual drop tuning</label>
+                <select id="ae-drop-tune" class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm">
+                    <option value="0">Off</option>
+                    <option value="-1">−1 semitone (E → Eb)</option>
+                    <option value="-2">−2 semitones (E → D)</option>
+                    <option value="-3">−3 semitones (E → C#)</option>
+                    <option value="-4">−4 semitones (E → C)</option>
+                    <option value="-5">−5 semitones (E → B)</option>
+                    <option value="-6">−6 semitones (E → Bb)</option>
+                    <option value="-7">−7 semitones (E → A)</option>
+                </select>
+                <span class="text-xs text-slate-500">(play in standard tuning and hear — and score — a lower tuning; experimental, single notes work best, adds ~15 ms)</span>
+            </div>
+            <div class="md:col-span-2">
                 <label class="flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" id="ae-amp-sims"
                            class="w-4 h-4 rounded bg-slate-700 border-slate-600 accent-emerald-500">

@@ -83,6 +83,8 @@ Napi::Value AcquireMonitorMuteHold(const Napi::CallbackInfo& info);
 Napi::Value ReleaseMonitorMuteHold(const Napi::CallbackInfo& info);
 Napi::Value GetMonitorMuteState(const Napi::CallbackInfo& info);
 Napi::Value SetMonitorKill(const Napi::CallbackInfo& info);
+Napi::Value SetDropTuneSemitones(const Napi::CallbackInfo& info);
+Napi::Value GetDropTuneSemitones(const Napi::CallbackInfo& info);
 Napi::Value SetMonitorMute(const Napi::CallbackInfo& info);
 Napi::Value SetMonitorMuteSuppressed(const Napi::CallbackInfo& info);
 Napi::Value SetMultiBypass(const Napi::CallbackInfo& info);

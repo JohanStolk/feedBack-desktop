@@ -121,6 +121,22 @@ Napi::Value SetMonitorKill(const Napi::CallbackInfo& info)
     return info.Env().Undefined();
 }
 
+Napi::Value SetDropTuneSemitones(const Napi::CallbackInfo& info)
+{
+    // IsNumber()-guarded fail-soft no-op, like SetMonitorKill. DropTuner clamps
+    // to [-12, 12] and maps non-finite values to 0 (off).
+    auto liveEngine = snapshotEngine();
+    if (liveEngine && info.Length() > 0 && info[0].IsNumber())
+        liveEngine->setDropTuneSemitones(info[0].As<Napi::Number>().FloatValue());
+    return info.Env().Undefined();
+}
+
+Napi::Value GetDropTuneSemitones(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    return Napi::Number::New(info.Env(), liveEngine ? liveEngine->getDropTuneSemitones() : 0.0);
+}
+
 Napi::Value SetNoiseGate(const Napi::CallbackInfo& info)
 {
     auto env = info.Env();

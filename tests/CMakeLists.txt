@@ -14,6 +14,7 @@ endif()
 # Pure-helper tests (no JUCE / no platform deps) build everywhere.
 add_subdirectory(audio_sanitize)
 add_subdirectory(engine_units)
+add_subdirectory(drop_tuner)
 
 # Note: enable_testing() lives in the top-level CMakeLists.txt — calling it
 # only here would register tests in build/tests/CTestTestfile.cmake but

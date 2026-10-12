@@ -25,6 +25,7 @@ type AudioDeviceSettings = {
     inputChannel: string;
     monitorMute?: boolean;
     monitorKill?: boolean;
+    dropTuneSemitones?: number;
     savedAt?: number;
 };
 
@@ -88,6 +89,10 @@ function normalizeDeviceSettings(settings: unknown): AudioDeviceSettings | null 
     }
     if (typeof record.monitorKill === 'boolean') {
         normalized.monitorKill = record.monitorKill;
+    }
+    const dropTune = Number(record.dropTuneSemitones);
+    if (record.dropTuneSemitones !== undefined && Number.isFinite(dropTune)) {
+        normalized.dropTuneSemitones = Math.max(-12, Math.min(12, Math.round(dropTune)));
     }
     const savedAt = Number(record.savedAt);
     if (Number.isFinite(savedAt) && savedAt > 0) {
@@ -632,6 +637,19 @@ export function initAudioBridge(): void {
         if (audio && typeof audio.setMonitorKill === 'function') {
             audio.setMonitorKill(Boolean(kill));
         }
+    });
+
+    // Virtual drop tuning (semitones, 0 = off). typeof-guarded fail-soft like
+    // setMonitorKill; coerced to a finite number for the N-API IsNumber() guard.
+    ipcMain.handle('audio:setDropTuneSemitones', (_event, semitones: number) => {
+        const value = Number(semitones);
+        if (audio && typeof audio.setDropTuneSemitones === 'function') {
+            audio.setDropTuneSemitones(Number.isFinite(value) ? value : 0);
+        }
+    });
+
+    ipcMain.handle('audio:getDropTuneSemitones', () => {
+        return typeof audio?.getDropTuneSemitones === 'function' ? audio.getDropTuneSemitones() : 0;
     });
 
     ipcMain.handle(

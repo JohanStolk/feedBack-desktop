@@ -104,6 +104,8 @@ using slopsmith::addon::SetDeviceType;
 using slopsmith::addon::SetGain;
 using slopsmith::addon::SetInputChannel;
 using slopsmith::addon::SetMonitorKill;
+using slopsmith::addon::SetDropTuneSemitones;
+using slopsmith::addon::GetDropTuneSemitones;
 using slopsmith::addon::SetMonitorMute;
 using slopsmith::addon::SetMonitorMuteSuppressed;
 using slopsmith::addon::AcquireMonitorMuteHold;
@@ -356,6 +358,8 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("getLatencyBreakdown", Napi::Function::New(env, GetLatencyBreakdown));
     exports.Set("isMonitorMuted", Napi::Function::New(env, IsMonitorMuted));
     exports.Set("setMonitorKill", Napi::Function::New(env, SetMonitorKill));
+    exports.Set("setDropTuneSemitones", Napi::Function::New(env, SetDropTuneSemitones));
+    exports.Set("getDropTuneSemitones", Napi::Function::New(env, GetDropTuneSemitones));
     exports.Set("setNoiseGate", Napi::Function::New(env, SetNoiseGate));
     exports.Set("setTonePolish", Napi::Function::New(env, SetTonePolish));
 

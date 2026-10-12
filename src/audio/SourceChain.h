@@ -8,6 +8,7 @@
 #include "ChordScorer.h"
 #include "MlNoteDetector.h"
 #include "NoteVerifier.h"
+#include "DropTuner.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <array>
 #include <atomic>
@@ -183,6 +184,12 @@ public:
     // existing amp-sim monitoring is unaffected.
     void setMonitorKill(bool kill) { monitorKill.store(kill); }
     bool isMonitorKilled() const { return monitorKill.load(); }
+    // Virtual drop tuning: shift the instrument by N semitones (0 = off) before
+    // every consumer — detectors, the verifier's input ring, the tone chain and
+    // monitoring — so tuner/scoring hear the same lowered instrument the player
+    // hears. See DropTuner.h.
+    void setDropTuneSemitones(float semitones) { dropTuner.setSemitones(semitones); }
+    float getDropTuneSemitones() const { return dropTuner.getSemitones(); }
 
     float getInputLevel() const { return currentInputLevel.load(); }
     float getInputPeak() const { return inputPeak.load(); }
@@ -234,6 +241,7 @@ private:
     std::atomic<int> monitorMuteHolds{0};
     std::atomic<int> monitorMuteSuppress{0};
     std::atomic<bool> monitorKill{false};
+    slopsmith::DropTuner dropTuner;            // prepared in prepare(); RT-safe process()
     std::atomic<uint32_t> nonFiniteChainBlocks{0};
 
     // ── Lock-free SPSC input rings (see AudioEngine.h for the full rationale) ──

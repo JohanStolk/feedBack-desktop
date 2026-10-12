@@ -185,6 +185,15 @@ public:
     }
     bool isMonitorKilled() const { return source0().isMonitorKilled(); }
 
+    // Virtual drop tuning (semitones, 0 = off). Like setMonitorKill a global
+    // preference: applied to every pooled source so additional inputs are shifted
+    // too; plain atomic stores, race-free off the control thread. See DropTuner.h.
+    void setDropTuneSemitones(float semitones)
+    {
+        pool.forEach([semitones](SourceChain& s) { s.setDropTuneSemitones(semitones); });
+    }
+    float getDropTuneSemitones() const { return source0().getDropTuneSemitones(); }
+
     // Number of audio blocks whose signal-chain output had to be scrubbed for
     // non-finite/runaway samples (issue #403). A nonzero value means the chain
     // (NAM/IR/VST) emitted garbage that was contained before it reached the

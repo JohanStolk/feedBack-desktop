@@ -39,6 +39,7 @@ void SourceChain::prepare(double sr, int blockSize)
     noteVerifier.prepare(sr, blockSize);
     noiseGate.prepare(sr, blockSize);
     tonePolish.prepare(sr);
+    dropTuner.prepare(sr);   // allocates; keeps the requested semitones
 }
 
 void SourceChain::releaseResources()
@@ -177,9 +178,24 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
         monoSource = inputCaptureScratch.data();
     }
 
+    // Virtual drop tuning: shift the mono source in place BEFORE every consumer
+    // below (ML detector, input-frame ring / note verifier, noise gate + YIN
+    // tuner, signal chain, monitoring). Always called so its input history stays
+    // current; with semitones == 0 it leaves the samples untouched.
     if (monoSource != nullptr)
     {
-        // Feed the polyphonic ML detector the dry mono signal (pre-gate).
+        float* mono = effectiveOutputChannels > 0 ? buffer.getWritePointer(0) : inputCaptureScratch.data();
+        dropTuner.process(mono, numSamples);
+        // The guitar source is mono and broadcast; keep the other channels in
+        // step with the shifted ch0 (only when shifting, so bypass is untouched).
+        if (dropTuner.getSemitones() != 0.0f)
+            for (int ch = 1; ch < filledOutputChannels; ++ch)
+                buffer.copyFrom(ch, 0, buffer, 0, 0, numSamples);
+    }
+
+    if (monoSource != nullptr)
+    {
+        // Feed the polyphonic ML detector the (drop-tuned) mono signal (pre-gate).
         // Lock-free and a no-op when ONNX support isn't compiled in.
         mlNoteDetector.pushSamples(monoSource, numSamples);
 

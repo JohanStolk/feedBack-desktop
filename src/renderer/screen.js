@@ -57,6 +57,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     const outputGainLabel = $('ae-output-gain-label');
     const monitorMuteCheckbox = $('ae-monitor-mute');
     const monitorKillCheckbox = $('ae-monitor-kill');
+    const dropTuneSelect = $('ae-drop-tune');
     const ampSimsCheckbox = $('ae-amp-sims');
     const chainContainer = $('ae-chain');
     const addVstBtn = $('ae-add-vst');
@@ -126,6 +127,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             inputChannel: inputChannelSelect.value,
             monitorMute: monitorMuteCheckbox.checked,
             monitorKill: monitorKillCheckbox.checked,
+            dropTuneSemitones: dropTuneSelect ? Number(dropTuneSelect.value) || 0 : 0,
         };
     }
 
@@ -186,6 +188,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         };
         if (typeof settings.monitorMute === 'boolean') normalized.monitorMute = settings.monitorMute;
         if (typeof settings.monitorKill === 'boolean') normalized.monitorKill = settings.monitorKill;
+        const dropTune = Number(settings.dropTuneSemitones);
+        if (settings.dropTuneSemitones !== undefined && Number.isFinite(dropTune)) {
+            normalized.dropTuneSemitones = Math.max(-12, Math.min(12, Math.round(dropTune)));
+        }
         const savedAt = Number(settings.savedAt);
         if (Number.isFinite(savedAt) && savedAt > 0) normalized.savedAt = savedAt;
         return normalized;
@@ -1017,6 +1023,13 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 try { await api.setMonitorKill?.(saved.monitorKill); }
                 catch (e) { console.warn('[audio-engine] setMonitorKill restore failed:', e); }
             }
+            if (saved.dropTuneSemitones !== undefined && dropTuneSelect) {
+                dropTuneSelect.value = String(saved.dropTuneSemitones);
+                if (dropTuneSelect.value !== String(saved.dropTuneSemitones)) dropTuneSelect.value = '0';
+                // Push immediately, like monitorKill: the native default is off.
+                try { await api.setDropTuneSemitones?.(Number(dropTuneSelect.value)); }
+                catch (e) { console.warn('[audio-engine] setDropTuneSemitones restore failed:', e); }
+            }
 
             // Respect refreshDeviceOptions's fail-closed verdict: if the
             // probe didn't explicitly confirm compatible=true, skip the
@@ -1689,6 +1702,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 if (Number.isFinite(inputChannel)) await api.setInputChannel(inputChannel);
                 await api.setMonitorMute(monitorMuteCheckbox.checked);
                 await api.setMonitorKill?.(monitorKillCheckbox.checked);
+                if (dropTuneSelect) await api.setDropTuneSemitones?.(Number(dropTuneSelect.value) || 0);
                 await api.startAudio();
                 audioRunning = true;
                 toggleBtn.textContent = 'Stop';
@@ -1733,6 +1747,14 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         monitorKillCheckbox.addEventListener('change', async () => {
             await api.setMonitorKill?.(monitorKillCheckbox.checked);
             await saveAppliedDeviceSettings({ monitorKill: monitorKillCheckbox.checked });
+        });
+
+        // Virtual drop tuning — shifts the instrument before the detectors and
+        // the tone chain (see src/audio/DropTuner.h). Applies live.
+        dropTuneSelect?.addEventListener('change', async () => {
+            const semitones = Number(dropTuneSelect.value) || 0;
+            await api.setDropTuneSemitones?.(semitones);
+            await saveAppliedDeviceSettings({ dropTuneSemitones: semitones });
         });
 
         // Use in-app amp sims (feedBack-desktop#46) — persists the opt-in to core
