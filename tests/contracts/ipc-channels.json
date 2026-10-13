@@ -77,6 +77,8 @@
   "audio:setChart",
   "audio:setDevice",
   "audio:setDeviceType",
+  "audio:setDropTuneChart",
+  "audio:setDropTuneClock",
   "audio:setDropTuneSemitones",
   "audio:setGain",
   "audio:setInputChannel",

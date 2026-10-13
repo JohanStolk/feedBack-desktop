@@ -193,6 +193,21 @@ public:
         pool.forEach([semitones](SourceChain& s) { s.setDropTuneSemitones(semitones); });
     }
     float getDropTuneSemitones() const { return source0().getDropTuneSemitones(); }
+    // The song's virtual-tuning chart and clock, likewise for every source
+    // (each keeps its own copy; set/clear allocate here, off the audio thread).
+    void setDropTuneChart(const std::vector<double>& shiftTimes, const std::vector<float>& shiftSemis,
+                          const std::vector<double>& noteTimes, const std::vector<float>& noteHz)
+    {
+        pool.forEach([&](SourceChain& s) { s.setDropTuneChart(shiftTimes, shiftSemis, noteTimes, noteHz); });
+    }
+    void clearDropTuneChart()
+    {
+        pool.forEach([](SourceChain& s) { s.clearDropTuneChart(); });
+    }
+    void setDropTuneClock(double songTime, bool playing)
+    {
+        pool.forEach([songTime, playing](SourceChain& s) { s.setDropTuneClock(songTime, playing); });
+    }
 
     // Number of audio blocks whose signal-chain output had to be scrubbed for
     // non-finite/runaway samples (issue #403). A nonzero value means the chain

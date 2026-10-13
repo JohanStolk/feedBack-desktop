@@ -10,9 +10,11 @@
 #include "../VSTHost.h"
 #include "../VSTTrace.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <vector>
 #include <string>
 
 namespace slopsmith::addon {
@@ -135,6 +137,61 @@ Napi::Value GetDropTuneSemitones(const Napi::CallbackInfo& info)
 {
     auto liveEngine = snapshotEngine();
     return Napi::Number::New(info.Env(), liveEngine ? liveEngine->getDropTuneSemitones() : 0.0);
+}
+
+namespace {
+// Numbers from a JS array (at most `cap`); non-numbers become NaN so pairs stay
+// aligned (DropTuner drops non-finite entries). Missing / non-array → empty.
+template <typename T>
+std::vector<T> numberArray(const Napi::Object& obj, const char* key, size_t cap)
+{
+    std::vector<T> out;
+    if (! obj.Has(key)) return out;
+    const Napi::Value v = obj.Get(key);
+    if (! v.IsArray()) return out;
+    const auto arr = v.As<Napi::Array>();
+    const uint32_t n = (uint32_t) std::min<size_t>(arr.Length(), cap);
+    out.reserve(n);
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const Napi::Value e = arr.Get(i);
+        out.push_back(e.IsNumber() ? (T) e.As<Napi::Number>().DoubleValue()
+                                   : std::numeric_limits<T>::quiet_NaN());
+    }
+    return out;
+}
+} // namespace
+
+Napi::Value SetDropTuneChart(const Napi::CallbackInfo& info)
+{
+    // { shiftTimes, shiftSemis, noteTimes, noteHz } (number arrays, song
+    // seconds / semitones / Hz). Anything else clears the chart. Fail-soft.
+    auto liveEngine = snapshotEngine();
+    if (! liveEngine) return info.Env().Undefined();
+    if (info.Length() < 1 || ! info[0].IsObject() || info[0].IsArray())
+    {
+        liveEngine->clearDropTuneChart();
+        return info.Env().Undefined();
+    }
+    constexpr size_t kMaxEntries = 200000;
+    const auto obj = info[0].As<Napi::Object>();
+    liveEngine->setDropTuneChart(numberArray<double>(obj, "shiftTimes", kMaxEntries),
+                                 numberArray<float>(obj, "shiftSemis", kMaxEntries),
+                                 numberArray<double>(obj, "noteTimes", kMaxEntries),
+                                 numberArray<float>(obj, "noteHz", kMaxEntries));
+    return info.Env().Undefined();
+}
+
+Napi::Value SetDropTuneClock(const Napi::CallbackInfo& info)
+{
+    // (songTime: number, playing?: boolean). Non-finite times are ignored.
+    auto liveEngine = snapshotEngine();
+    if (liveEngine && info.Length() > 0 && info[0].IsNumber())
+    {
+        const bool playing = info.Length() > 1 && info[1].IsBoolean() ? info[1].As<Napi::Boolean>().Value() : true;
+        liveEngine->setDropTuneClock(info[0].As<Napi::Number>().DoubleValue(), playing);
+    }
+    return info.Env().Undefined();
 }
 
 Napi::Value SetNoiseGate(const Napi::CallbackInfo& info)

@@ -76,6 +76,8 @@
   "setCrashedPlugins",
   "setDevice",
   "setDeviceType",
+  "setDropTuneChart",
+  "setDropTuneClock",
   "setDropTuneSemitones",
   "setGain",
   "setInputChannel",

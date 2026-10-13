@@ -132,16 +132,20 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         };
     }
 
-    // ── Magical tuning ────────────────────────────────────────────────────────
-    // Virtual drop tuning that follows the song: the shift comes from the
-    // arrangement's tuning instead of a fixed choice. Uniform tunings (Eb, D,
-    // B standard…) get one shift for the song; mixed ones (Drop D…) switch per
-    // note from the chart, since the engine only hears one mono input and can't
-    // tell strings apart. Assumes the instrument is in standard tuning: the
-    // working-tuning state can't be used, because the tuner hears the already
-    // shifted signal and would report the song's tuning back.
+    // ── Virtual tuning: match each song + chart priming ───────────────────────
+    // The native DropTuner (src/audio/DropTuner.h) shifts the instrument input.
+    // During a song it also gets the song's chart and clock:
+    //  - "Match each song" (selector value "auto"): the shift comes from the
+    //    arrangement's tuning. Uniform tunings (Eb, D, B standard…) get one
+    //    shift; mixed ones (Drop D…) switch per note at chart time, since the
+    //    engine only hears one mono input and can't tell strings apart.
+    //  - Chart priming (both modes): each note's expected input pitch, so the
+    //    shifter splices at the right period from the pluck on.
+    // Assumes the instrument is in standard tuning: the working-tuning state
+    // can't be used, because the tuner hears the already shifted signal and
+    // would report the song's tuning back.
     //
-    // MAGIC-PURE-BEGIN — pure helpers, loaded by tests/magic-tuning.test.js.
+    // VT-PURE-BEGIN — pure helpers, loaded by tests/virtual-tuning.test.js.
     // Per-string shift (semitones, low string first) for an instrument in
     // standard tuning: the arrangement's offset plus centOffset (−1200 = the
     // octave-down bass convention). null when there's no usable tuning.
@@ -195,19 +199,60 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         return out;
     }
 
-    // Index of the change point in effect at time t. `hint` (the previous
-    // answer) makes normal playback O(1); seeks fall back to a binary search.
-    function magicTuningIndexAt(schedule, t, hint) {
-        const n = schedule.length;
-        const fits = (i) => i >= 0 && i < n && schedule[i].t <= t && (i + 1 >= n || schedule[i + 1].t > t);
-        if (fits(hint)) return hint;
-        if (fits(hint + 1)) return hint + 1;
-        let lo = 0, hi = n - 1;
-        while (lo < hi) {
-            const mid = (lo + hi + 1) >> 1;
-            if (schedule[mid].t <= t) lo = mid; else hi = mid - 1;
+    // Standard-tuning open strings (MIDI, low string first) of the instrument
+    // the player holds: bass 4/5/6 (E A D G, + low B, + high C), guitar 6/7/8.
+    function virtualTuningOpenMidi(stringCount, isBass) {
+        const sc = Number(stringCount) || (isBass ? 4 : 6);
+        if (isBass) {
+            if (sc >= 6) return [23, 28, 33, 38, 43, 48];
+            if (sc === 5) return [23, 28, 33, 38, 43];
+            return [28, 33, 38, 43].slice(0, Math.max(1, sc));
         }
-        return lo;
+        if (sc >= 8) return [30, 35, 40, 45, 50, 55, 59, 64];
+        if (sc === 7) return [35, 40, 45, 50, 55, 59, 64];
+        return [40, 45, 50, 55, 59, 64].slice(0, Math.max(1, sc));
+    }
+
+    // Chart priming: each note's expected INPUT pitch (Hz), i.e. the song's
+    // pitch minus the shift on that string, which is what the instrument
+    // itself sounds. Chords use their lowest note. Harmonics and muted notes
+    // are skipped (their pitch isn't the fretted one); so is anything outside
+    // the shifter's 35–400 Hz tracking range. Returns parallel sorted arrays.
+    function virtualTuningHints(notes, chords, song, perString) {
+        const sc = perString.length;
+        const open = virtualTuningOpenMidi(sc, !!song.isBass);
+        const tuning = Array.isArray(song.tuning) ? song.tuning : [];
+        const cents = Number(song.centOffset);
+        const base = Number.isFinite(cents) ? cents / 100 : 0;
+        const capo = Number.isFinite(Number(song.capo)) ? Number(song.capo) : 0;
+        const pitched = (n) => n && !n.hm && !n.hp && !n.mt && !n.fhm
+            && Number.isInteger(n.s) && n.s >= 0 && n.s < sc && open[n.s] !== undefined
+            && Number.isFinite(n.f) && n.f >= 0;
+        const hzOf = (n) => {
+            const off = Number(tuning[n.s]);
+            const midi = open[n.s] + (Number.isFinite(off) ? off : 0) + base
+                + n.f + (n.f === 0 ? capo : 0) - perString[n.s];
+            const hz = 440 * Math.pow(2, (midi - 69) / 12);
+            return hz >= 35 && hz <= 400 ? hz : null;
+        };
+        const events = [];
+        for (const n of notes || []) {
+            if (!pitched(n) || !Number.isFinite(n.t)) continue;
+            const hz = hzOf(n);
+            if (hz !== null) events.push([n.t, hz]);
+        }
+        for (const c of chords || []) {
+            if (!c || !Number.isFinite(c.t) || !Array.isArray(c.notes)) continue;
+            let low = null;
+            for (const cn of c.notes) if (pitched(cn) && (low === null || cn.s < low.s)) low = cn;
+            const hz = low ? hzOf(low) : null;
+            if (hz !== null) events.push([c.t, hz]);
+        }
+        events.sort((a, b) => a[0] - b[0]);
+        return {
+            t: events.map((e) => e[0]),
+            hz: events.map((e) => Math.round(e[1] * 1000) / 1000),
+        };
     }
 
     function magicTuningDescribe(shifts) {
@@ -218,21 +263,24 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         }
         return `This song: per note, ${shifts.map(fmt).join(' / ')} (low → high string).`;
     }
-    // MAGIC-PURE-END
+    // VT-PURE-END
 
-    const MAGIC_LEAD_S = 0.06;
-    let magicEnabled = false;
-    let magicSchedule = null;
-    let magicIdx = 0;
-    let magicSent = null;      // last value sent to the engine (avoids per-frame IPC)
-    if (hookState.magicRaf) cancelAnimationFrame(hookState.magicRaf);   // re-evaluation
-    hookState.magicRaf = 0;
+    const VT_SHIFT_LEAD_S = 0.06;   // a per-note shift change lands this early
+    let vtSent = null;              // last setSemitones value (avoids repeat IPC)
+    let vtChartSet = false;
+    if (hookState.vtRaf) cancelAnimationFrame(hookState.vtRaf);   // re-evaluation
+    hookState.vtRaf = 0;
 
-    function magicSend(semis) {
-        if (semis === magicSent) return;
-        magicSent = semis;
+    // 'auto' (match each song) or the fixed shift in semitones (0 = off).
+    function vtMode() {
+        const v = dropTuneSelect ? dropTuneSelect.value : '0';
+        return v === 'auto' ? 'auto' : (Number(v) || 0);
+    }
+    function vtSendSemis(semis) {
+        if (semis === vtSent) return;
+        vtSent = semis;
         Promise.resolve(api.setDropTuneSemitones?.(semis))
-            .catch((e) => console.warn('[audio-engine] magical tuning: setDropTuneSemitones failed:', e));
+            .catch((e) => console.warn('[audio-engine] virtual tuning: setDropTuneSemitones failed:', e));
     }
     // Tells the highway whether the input is shifted: the 3D highway then names
     // notes as fingered on a standard-tuned instrument (window.feedBack.virtualTuning).
@@ -240,87 +288,120 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         const bus = window.feedBack || window.slopsmith;
         if (bus) bus.virtualTuning = { active: !!active, mode };
     }
-    function magicStatus(text) {
+    function vtStatus(text) {
         const el = $('ae-drop-tune-status');
         if (!el) return;
         el.textContent = text || '';
         el.classList.toggle('hidden', !text);
     }
-    function magicStop() {
-        if (hookState.magicRaf) cancelAnimationFrame(hookState.magicRaf);
-        hookState.magicRaf = 0;
-        magicSchedule = null;
+    function vtClearChart() {
+        if (hookState.vtRaf) cancelAnimationFrame(hookState.vtRaf);
+        hookState.vtRaf = 0;
+        if (!vtChartSet) return;
+        vtChartSet = false;
+        Promise.resolve(api.setDropTuneChart?.(null)).catch(() => {});
     }
-    // (Re)read the loaded song and start following it. Called when a song's
-    // chart is ready, on arrangement changes, and when Magical is selected.
-    function magicRefresh() {
-        magicStop();
-        if (!magicEnabled) { magicStatus(''); return; }
+    // (Re)read the loaded song and hand its chart + clock to the engine. Called
+    // when a song's chart is ready (also after an arrangement switch) and when
+    // the setting changes.
+    function vtRefresh() {
+        vtClearChart();
+        const mode = vtMode();
+        const auto = mode === 'auto';
+        if (!auto && mode === 0) { publishVirtualTuning(false, 'manual'); vtStatus(''); return; }
         const hw = window.highway;
-        const loaded = hw && typeof hw.getTuning === 'function' && Array.isArray(hw.getNotes?.())
-            && (hw.getNotes().length > 0 || (hw.getChords?.() || []).length > 0);
-        const shifts = loaded ? magicTuningShifts({
+        const notes = hw && typeof hw.getNotes === 'function' ? hw.getNotes() : null;
+        const chords = hw && typeof hw.getChords === 'function' ? (hw.getChords() || []) : [];
+        const loaded = Array.isArray(notes) && typeof hw.getTuning === 'function'
+            && (notes.length > 0 || chords.length > 0);
+        if (!loaded) {
+            if (auto) {
+                vtSendSemis(0);
+                publishVirtualTuning(false, 'auto');
+                vtStatus('Match each song: waiting for a song.');
+            } else {
+                publishVirtualTuning(true, 'manual');
+            }
+            return;
+        }
+        const song = {
             tuning: hw.getTuning(),
             stringCount: hw.getStringCount?.(),
             centOffset: hw.getCentOffset?.(),
-        }) : null;
-        if (!shifts) {
-            magicSend(0);
-            publishVirtualTuning(false, 'auto');
-            magicStatus('Magical tuning: waiting for a song.');
-            return;
+            capo: hw.getCapo?.(),
+            isBass: /bass/i.test(String(hw.getSongInfo?.()?.arrangement || '')),
+        };
+        let perString;
+        const chart = {};
+        if (auto) {
+            perString = magicTuningShifts(song);
+            if (!perString) {
+                vtSendSemis(0);
+                publishVirtualTuning(false, 'auto');
+                vtStatus('Match each song: this song has no tuning information.');
+                return;
+            }
+            vtStatus(magicTuningDescribe(perString));
+            publishVirtualTuning(perString.some((v) => v !== 0), 'auto');
+            if (perString.every((v) => v === 0)) { vtSendSemis(0); return; }
+            const schedule = magicTuningSchedule(notes, chords, perString, VT_SHIFT_LEAD_S);
+            chart.shiftTimes = schedule.map((e) => (Number.isFinite(e.t) ? e.t : -1e9));
+            chart.shiftSemis = schedule.map((e) => e.semis);
+            // Between songs, and on an addon without charts, the plain amount applies.
+            vtSendSemis(perString.every((v) => v === perString[0]) ? perString[0] : 0);
+        } else {
+            const sc = Number(song.stringCount) || (Array.isArray(song.tuning) ? song.tuning.length : 0) || 6;
+            perString = new Array(sc).fill(mode);
+            publishVirtualTuning(true, 'manual');
         }
-        publishVirtualTuning(shifts.some((v) => v !== 0), 'auto');
-        magicStatus(magicTuningDescribe(shifts));
-        if (shifts.every((v) => v === shifts[0])) { magicSend(shifts[0]); return; }
-        magicSchedule = magicTuningSchedule(hw.getNotes(), hw.getChords?.(), shifts, MAGIC_LEAD_S);
-        if (!magicSchedule.length) { magicSend(0); return; }
-        magicIdx = 0;
+        const hints = virtualTuningHints(notes, chords, song, perString);
+        chart.noteTimes = hints.t;
+        chart.noteHz = hints.hz;
+        if (typeof api.setDropTuneChart !== 'function') return;   // older addon: no chart
+        Promise.resolve(api.setDropTuneChart(chart))
+            .catch((e) => console.warn('[audio-engine] virtual tuning: setDropTuneChart failed:', e));
+        vtChartSet = true;
+        // Song clock for the engine, every frame. A plain getter read plus one
+        // IPC message; no DOM work.
+        const bus = window.feedBack || window.slopsmith;
         const tick = () => {
-            hookState.magicRaf = requestAnimationFrame(tick);
+            hookState.vtRaf = requestAnimationFrame(tick);
             const t = Number(hw.getTime?.());
-            if (!Number.isFinite(t) || !magicSchedule) return;
-            magicIdx = magicTuningIndexAt(magicSchedule, t, magicIdx);
-            magicSend(magicSchedule[magicIdx].semis);
+            if (!Number.isFinite(t)) return;
+            Promise.resolve(api.setDropTuneClock?.(t, !!(bus && bus.isPlaying))).catch(() => {});
         };
         tick();
-        console.info('[audio-engine] magical tuning: per-note shifts', shifts, '-', magicSchedule.length, 'changes');
+        console.info('[audio-engine] virtual tuning:', auto ? 'match song' : `fixed ${mode}`, perString,
+            '-', (chart.shiftTimes || []).length, 'shift points,', hints.t.length, 'primed notes');
     }
-    function magicSetEnabled(on) {
-        magicEnabled = !!on;
-        magicSent = null;
-        if (magicEnabled) magicRefresh();
-        else { magicStop(); magicStatus(''); }
-    }
-    function magicSongStopped() {
-        if (!magicEnabled) return;
-        magicStop();
-        magicSend(0);
+    function vtSongStopped() {
+        vtClearChart();
+        if (vtMode() !== 'auto') return;
+        vtSendSemis(0);
         publishVirtualTuning(false, 'auto');
-        magicStatus('Magical tuning: waiting for a song.');
+        vtStatus('Match each song: waiting for a song.');
     }
-    // Re-applies whatever the selector says (engine (re)start, device apply).
+    // Applies whatever the selector says (setting change, restore, engine start).
     async function applyDropTuneSetting() {
         if (!dropTuneSelect) return;
-        if (dropTuneSelect.value === 'auto') {
-            magicSent = null;
-            magicRefresh();
-        } else {
-            const semitones = Number(dropTuneSelect.value) || 0;
-            publishVirtualTuning(semitones !== 0, 'manual');
-            await api.setDropTuneSemitones?.(semitones);
+        const mode = vtMode();
+        vtSent = null;
+        if (mode !== 'auto') {
+            vtSent = mode;
+            await api.setDropTuneSemitones?.(mode);
         }
+        vtRefresh();
     }
-    hookState.magicLifecycle = { ready: magicRefresh, stopped: magicSongStopped };
-    (function installMagicLifecycle() {
+    hookState.vtLifecycle = { ready: vtRefresh, stopped: vtSongStopped };
+    (function installVirtualTuningLifecycle() {
         const bus = window.feedBack || window.slopsmith;
-        if (hookState.magicLifecycleInstalled || !bus || typeof bus.on !== 'function') return;
-        hookState.magicLifecycleInstalled = true;
+        if (hookState.vtLifecycleInstalled || !bus || typeof bus.on !== 'function') return;
+        hookState.vtLifecycleInstalled = true;
         // song:ready fires once the whole chart has arrived, also after an
         // arrangement switch (the highway reloads the chart).
-        bus.on('song:ready', () => hookState.magicLifecycle?.ready?.());
-        bus.on('song:stop', () => hookState.magicLifecycle?.stopped?.());
-        bus.on('song:ended', () => hookState.magicLifecycle?.stopped?.());
+        bus.on('song:ready', () => hookState.vtLifecycle?.ready?.());
+        bus.on('song:stop', () => hookState.vtLifecycle?.stopped?.());
+        bus.on('song:ended', () => hookState.vtLifecycle?.stopped?.());
     })();
 
     function cloneDeviceSettings(settings) {
@@ -1216,16 +1297,16 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 try { await api.setMonitorKill?.(saved.monitorKill); }
                 catch (e) { console.warn('[audio-engine] setMonitorKill restore failed:', e); }
             }
-            if (saved.dropTuneAuto === true && dropTuneSelect) {
-                dropTuneSelect.value = 'auto';
-                magicSetEnabled(true);
-            } else if (saved.dropTuneSemitones !== undefined && dropTuneSelect) {
-                dropTuneSelect.value = String(saved.dropTuneSemitones);
-                if (dropTuneSelect.value !== String(saved.dropTuneSemitones)) dropTuneSelect.value = '0';
+            if (dropTuneSelect && (saved.dropTuneAuto === true || saved.dropTuneSemitones !== undefined)) {
+                if (saved.dropTuneAuto === true) {
+                    dropTuneSelect.value = 'auto';
+                } else {
+                    dropTuneSelect.value = String(saved.dropTuneSemitones);
+                    if (dropTuneSelect.value !== String(saved.dropTuneSemitones)) dropTuneSelect.value = '0';
+                }
                 // Push immediately, like monitorKill: the native default is off.
-                publishVirtualTuning(Number(dropTuneSelect.value) !== 0, 'manual');
-                try { await api.setDropTuneSemitones?.(Number(dropTuneSelect.value)); }
-                catch (e) { console.warn('[audio-engine] setDropTuneSemitones restore failed:', e); }
+                try { await applyDropTuneSetting(); }
+                catch (e) { console.warn('[audio-engine] virtual tuning restore failed:', e); }
             }
 
             // Respect refreshDeviceOptions's fail-closed verdict: if the
@@ -1946,17 +2027,13 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             await saveAppliedDeviceSettings({ monitorKill: monitorKillCheckbox.checked });
         });
 
-        // Virtual drop tuning — shifts the instrument before the detectors and
-        // the tone chain (see src/audio/DropTuner.h). Applies live. "auto" is
-        // Magical tuning: the shift follows the loaded song.
+        // Virtual tuning — shifts the instrument before the detectors and the
+        // tone chain (see src/audio/DropTuner.h). Applies live. "auto" = match
+        // each song: the shift follows the loaded song's tuning.
         dropTuneSelect?.addEventListener('change', async () => {
             const auto = dropTuneSelect.value === 'auto';
             const semitones = auto ? 0 : Number(dropTuneSelect.value) || 0;
-            magicSetEnabled(auto);
-            if (!auto) {
-                publishVirtualTuning(semitones !== 0, 'manual');
-                await api.setDropTuneSemitones?.(semitones);
-            }
+            await applyDropTuneSetting();
             await saveAppliedDeviceSettings({ dropTuneSemitones: semitones, dropTuneAuto: auto });
         });
 

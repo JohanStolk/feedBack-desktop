@@ -265,6 +265,167 @@ static void test_switch_follows_new_amount()
           "after -6 -> -2: expected %.2f Hz, got %.2f Hz", expected, got);
 }
 
+// ── Chart: shift points, priming, plucks ────────────────────────────────────
+
+// Process `x` in blocks, pushing the song clock (= sample time + offset) before
+// each block, as the renderer does once per frame.
+static void runClocked(DropTuner& dt, std::vector<float>& x, size_t from, size_t to, double sr,
+                       double clockOffset = 0.0, int block = 256)
+{
+    for (size_t i = from; i < to; i += (size_t) block)
+    {
+        dt.setClock(clockOffset + (double) i / sr, true);
+        dt.process(x.data() + i, (int) std::min((size_t) block, to - i));
+    }
+}
+
+// A run of plucked notes, each `noteSec` long, back to back; each is muted
+// over its last 100 ms, like a player stopping the string before the next pluck.
+static std::vector<float> noteRun(const std::vector<double>& hz, double noteSec, double sr)
+{
+    std::vector<float> x;
+    const size_t mute = (size_t) (0.100 * sr);
+    for (double f : hz)
+    {
+        auto n = bassNote(f, noteSec, sr);
+        for (size_t i = 0; i < mute && i < n.size(); ++i) n[n.size() - 1 - i] *= (float) i / mute;
+        x.insert(x.end(), n.begin(), n.end());
+    }
+    return x;
+}
+
+static void test_chart_shift_points_follow_the_clock()
+{
+    const double sr = 48000.0;
+    DropTuner dt;
+    dt.prepare(sr);
+    dt.setSemitones(-5.0f);                        // ignored while the chart has shift points
+    dt.setChart({ -1e9, 1.0 }, { -2.0f, 0.0f }, {}, {});
+    std::vector<float> in(2 * (size_t) sr);
+    for (size_t n = 0; n < in.size(); ++n) in[n] = (float) (0.4 * std::sin(2 * kPi * 55.0 * n / sr));
+    auto out = in;
+    runClocked(dt, out, 0, (size_t) (0.9 * sr) / 256 * 256, sr);
+    CHECK(dt.getActiveSemitones() == -2.0f, "before 1.0 s: %g", dt.getActiveSemitones());
+    const double expected = 55.0 * std::pow(2.0, -2.0 / 12.0);
+    const double got = measureHz(out, (size_t) (0.4 * sr), (size_t) (0.85 * sr), sr, expected / 1.5, expected * 1.5);
+    CHECK(got > 0.0 && std::abs(cents(got, expected)) < 10.0, "shift point -2: expected %.2f Hz, got %.2f", expected, got);
+    runClocked(dt, out, (size_t) (0.9 * sr) / 256 * 256, out.size(), sr);
+    CHECK(dt.getActiveSemitones() == 0.0f, "after 1.0 s: %g", dt.getActiveSemitones());
+    bool dry = true;
+    for (size_t i = (size_t) (1.05 * sr); i < out.size(); ++i) dry = dry && out[i] == in[i];
+    CHECK(dry, "a 0 shift point must end in the dry signal");
+
+    // Seek back before the change point: the earlier amount applies again.
+    std::vector<float> more(in.begin(), in.begin() + (size_t) (0.2 * sr));
+    runClocked(dt, more, 0, more.size(), sr, 0.3);
+    CHECK(dt.getActiveSemitones() == -2.0f, "after seeking back to 0.3 s: %g", dt.getActiveSemitones());
+
+    // Clearing the chart hands control back to setSemitones().
+    dt.clearChart();
+    std::vector<float> tail(in.begin(), in.begin() + (size_t) (0.1 * sr));
+    runClocked(dt, tail, 0, tail.size(), sr, 0.5);
+    CHECK(dt.getActiveSemitones() == -5.0f, "after clearChart: %g", dt.getActiveSemitones());
+}
+
+static void test_priming_loads_the_expected_period()
+{
+    // E1 then A1. Primed, the A1 period is in place from its pluck on; the
+    // tracker alone would still report E1 until its window fills with A1.
+    const double sr = 48000.0, noteSec = 0.5;
+    const auto in = noteRun({ 41.2, 55.0 }, noteSec, sr);
+    const size_t pluck = (size_t) (noteSec * sr);
+    // A low note's pluck is detected at its first big peak (~13 ms for A1-E1),
+    // so probe 25 ms in: the tracker's 57 ms window is still mostly E1 then.
+    const size_t probe = pluck + (size_t) (0.025 * sr) / 256 * 256;
+
+    DropTuner primed, plain;
+    for (DropTuner* dt : { &primed, &plain })
+    {
+        dt->prepare(sr);
+        dt->setSemitones(-6.0f);
+    }
+    primed.setChart({}, {}, { 0.0, noteSec }, { 41.2f, 55.0f });
+    auto a = in, b = in;
+    runClocked(primed, a, 0, probe, sr);
+    runClocked(plain, b, 0, probe, sr);
+    const double want = sr / 55.0;
+    CHECK(std::abs(primed.getTrackedPeriod() - want) / want < 0.02,
+          "primed period %.1f, expected %.1f (A1)", primed.getTrackedPeriod(), want);
+    CHECK(std::abs(plain.getTrackedPeriod() - want) / want > 0.05,
+          "unprimed tracker already on A1 (%.1f) — the test no longer shows priming", plain.getTrackedPeriod());
+    CHECK(primed.getOnsetCount() >= 2, "plucks detected: %u", primed.getOnsetCount());
+}
+
+static void test_pluck_restarts_the_head()
+{
+    // At a pluck matching a chart note the delay drops to the minimum
+    // (crossfaded), instead of wherever the splice cycle happened to be.
+    const double sr = 48000.0, noteSec = 0.5;
+    const auto in = noteRun({ 41.2, 41.2, 41.2, 41.2 }, noteSec, sr);
+    DropTuner primed, plain;
+    for (DropTuner* dt : { &primed, &plain })
+    {
+        dt->prepare(sr);
+        dt->setSemitones(-6.0f);
+    }
+    primed.setChart({}, {}, { 0.0, 0.5, 1.0, 1.5 }, { 41.2f, 41.2f, 41.2f, 41.2f });
+    double sumPrimed = 0.0, sumPlain = 0.0;
+    auto a = in, b = in;
+    size_t done = 0;
+    for (int k = 1; k < 4; ++k)
+    {
+        // After the pluck is detected (~18 ms on E1: its first big peak) and
+        // the 4 ms crossfade.
+        const size_t at = (size_t) ((k * noteSec + 0.030) * sr) / 256 * 256;
+        runClocked(primed, a, done, at, sr);
+        runClocked(plain, b, done, at, sr);
+        done = at;
+        sumPrimed += primed.getDelaySamples();
+        sumPlain += plain.getDelaySamples();
+    }
+    // Restarted: the minimum (crossfade + 2 samples) plus the drift since the
+    // restart (rate 0.71 → 0.29 ms per ms, ~8 ms) — well under one E1 span
+    // (24 ms), where the unprimed head can be anywhere.
+    const double minMs = 4.0 + 2.0 / 48.0;
+    const double primedMs = sumPrimed / 3.0 / sr * 1000.0, plainMs = sumPlain / 3.0 / sr * 1000.0;
+    CHECK(primedMs < minMs + 4.0, "delay after a primed pluck: %.1f ms (min %.1f; unprimed %.1f)",
+          primedMs, minMs, plainMs);
+    CHECK(primed.getOnsetCount() >= 4, "plucks detected: %u", primed.getOnsetCount());
+}
+
+static void test_wrong_chart_falls_back_to_the_player()
+{
+    // The chart expects A1 but the player plays D2: the guided search fails,
+    // the free search follows the player, and the pitch is still right.
+    const double sr = 48000.0;
+    DropTuner dt;
+    dt.prepare(sr);
+    dt.setSemitones(-6.0f);
+    dt.setChart({}, {}, { 0.0 }, { 55.0f });
+    auto x = bassNote(73.42, 1.2, sr);
+    runClocked(dt, x, 0, x.size(), sr);
+    const double expected = 73.42 * std::pow(2.0, -6.0 / 12.0);
+    const double got = measureHz(x, (size_t) (0.5 * sr), (size_t) (0.9 * sr), sr, expected / 1.5, expected * 1.5);
+    CHECK(got > 0.0 && std::abs(cents(got, expected)) < 10.0, "wrong chart note: expected %.2f Hz, got %.2f", expected, got);
+}
+
+static void test_chart_input_is_sanitised()
+{
+    const double sr = 48000.0;
+    DropTuner dt;
+    dt.prepare(sr);
+    // Unsorted, non-finite, out-of-range pitches and mismatched lengths: no crash,
+    // the bad entries are dropped and the rest still applies.
+    dt.setChart({ 0.5, -1e9, std::nan("") }, { 0.0f, -3.0f, -2.0f }, { 1.0, 0.2, 0.3 },
+                { std::nanf(""), 5000.0f });
+    dt.setClock(std::nan(""), true);                // ignored
+    std::vector<float> x((size_t) (0.3 * sr), 0.0f);
+    runClocked(dt, x, 0, x.size(), sr);
+    CHECK(dt.getActiveSemitones() == -3.0f, "sorted shift points: %g", dt.getActiveSemitones());
+    CHECK(dt.getHintPeriod() == 0.0, "no valid note → no hint: %g", dt.getHintPeriod());
+    for (float v : x) CHECK(std::isfinite(v) && v == 0.0f, "silence stays silent");
+}
+
 int main()
 {
     test_bypass_is_identity();
@@ -280,6 +441,11 @@ int main()
     test_switching_is_click_free();
     test_back_to_zero_is_dry();
     test_switch_follows_new_amount();
+    test_chart_shift_points_follow_the_clock();
+    test_priming_loads_the_expected_period();
+    test_pluck_restarts_the_head();
+    test_wrong_chart_falls_back_to_the_player();
+    test_chart_input_is_sanitised();
     if (failures == 0) std::printf("drop_tuner_test: all checks passed\n");
     return failures == 0 ? 0 : 1;
 }

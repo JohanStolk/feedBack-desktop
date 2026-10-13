@@ -657,6 +657,22 @@ export function initAudioBridge(): void {
         return typeof audio?.getDropTuneSemitones === 'function' ? audio.getDropTuneSemitones() : 0;
     });
 
+    // Per-song virtual-tuning chart: shift change points and each note's
+    // expected input pitch (see src/audio/DropTuner.h). Anything that isn't a
+    // plain object clears it; the addon validates the arrays.
+    ipcMain.handle('audio:setDropTuneChart', (_event, chart: unknown) => {
+        if (!audio || typeof audio.setDropTuneChart !== 'function') return;
+        const isPlainObject = !!chart && typeof chart === 'object' && !Array.isArray(chart);
+        audio.setDropTuneChart(isPlainObject ? chart : null);
+    });
+
+    // Song clock for the chart, pushed about once per frame while a chart is set.
+    ipcMain.handle('audio:setDropTuneClock', (_event, songTime: unknown, playing: unknown) => {
+        if (!audio || typeof audio.setDropTuneClock !== 'function') return;
+        if (typeof songTime !== 'number' || !Number.isFinite(songTime)) return;
+        audio.setDropTuneClock(songTime, playing !== false);
+    });
+
     ipcMain.handle(
         'audio:setNoiseGate',
         (

@@ -190,6 +190,15 @@ public:
     // hears. See DropTuner.h.
     void setDropTuneSemitones(float semitones) { dropTuner.setSemitones(semitones); }
     float getDropTuneSemitones() const { return dropTuner.getSemitones(); }
+    // Per-song chart (shift change points + expected input pitches) and the
+    // song clock, for "match each song" and chart priming. See DropTuner.h.
+    void setDropTuneChart(const std::vector<double>& shiftTimes, const std::vector<float>& shiftSemis,
+                          const std::vector<double>& noteTimes, const std::vector<float>& noteHz)
+    {
+        dropTuner.setChart(shiftTimes, shiftSemis, noteTimes, noteHz);
+    }
+    void clearDropTuneChart() { dropTuner.clearChart(); }
+    void setDropTuneClock(double songTime, bool playing) { dropTuner.setClock(songTime, playing); }
 
     float getInputLevel() const { return currentInputLevel.load(); }
     float getInputPeak() const { return inputPeak.load(); }

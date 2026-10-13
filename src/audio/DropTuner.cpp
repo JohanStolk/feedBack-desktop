@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace slopsmith {
 
@@ -15,6 +16,13 @@ constexpr double kXfadeMs = 4.0;
 constexpr double kDefaultSpanMs = 20.0;
 constexpr double kMinSpanMs = 8.0;
 constexpr double kHopMs = 5.3;         // tracker update interval (~256 samples @ 48 kHz)
+constexpr double kPrimeLeadSec = 0.010; // load a note's expected period this early
+constexpr double kOnsetToleranceSec = 0.080; // a pluck this close to a chart note is that note
+constexpr double kHintRangeSemitones = 1.5;  // primed search: expected note ± this
+constexpr double kSeekBackSec = 0.05, kSeekForwardSec = 0.5; // clock jumps that mean a seek
+// Onset detector (prototype values): fast (1 ms) envelope above 3x the slow
+// (50 ms) one and above a floor (~-46 dBFS), at most one per 60 ms.
+constexpr double kOnsetRatio = 3.0, kOnsetFloor = 0.005, kOnsetHoldoffMs = 60.0;
 
 size_t nextPow2(size_t v)
 {
@@ -32,6 +40,9 @@ void DropTuner::prepare(double sampleRate)
     defaultSpan = kDefaultSpanMs * sr / 1000.0;
     minSpan = std::max(kMinSpanMs * sr / 1000.0, 2.0 * xfadeLen);
     hop = std::max(32, (int) std::lround(kHopMs * sr / 1000.0));
+    aFast = std::exp(-1.0 / (0.001 * sr));
+    aSlow = std::exp(-1.0 / (0.050 * sr));
+    onsetHoldoff = std::max(1, (int) std::lround(kOnsetHoldoffMs * sr / 1000.0));
 
     tauMax = (int) (sr / kFmin);
     tauMin = std::max(2, (int) (sr / kFmax));
@@ -78,6 +89,97 @@ void DropTuner::reset() noexcept
     xfadeLeft = 0;
     period = 0.0;
     hopCounter = 0;
+    hint = 0.0;
+    sincePluck = kNoPluck;
+    restartPending = false;
+    envFast = envSlow = 0.0;
+    sinceOnset = onsetHoldoff;
+    lastSongTime = -1e300;                         // re-sync the chart position
+    haveClock = false;
+    seenClockGen = clockGen.load(std::memory_order_acquire) - 1;  // re-read the clock
+}
+
+DropTuner::~DropTuner()
+{
+    delete chart;
+    delete pendingChart.exchange(nullptr);
+    delete retiredChart.exchange(nullptr);
+}
+
+void DropTuner::setChart(const std::vector<double>& shiftTimes, const std::vector<float>& shiftSemis,
+                         const std::vector<double>& noteTimes, const std::vector<float>& noteHz)
+{
+    auto* c = new Chart();
+    std::vector<std::pair<double, float>> pairs;
+    pairs.reserve(std::min(shiftTimes.size(), shiftSemis.size()));
+    for (size_t i = 0; i < shiftTimes.size() && i < shiftSemis.size(); ++i)
+        if (std::isfinite(shiftTimes[i]) && std::isfinite(shiftSemis[i]))
+            pairs.emplace_back(shiftTimes[i], std::clamp(shiftSemis[i], -kMaxSemitones, kMaxSemitones));
+    std::stable_sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& p : pairs) { c->shiftT.push_back(p.first); c->shiftSemis.push_back(p.second); }
+
+    pairs.clear();
+    for (size_t i = 0; i < noteTimes.size() && i < noteHz.size(); ++i)
+        if (std::isfinite(noteTimes[i]) && std::isfinite(noteHz[i]) && noteHz[i] >= kFmin && noteHz[i] <= kFmax)
+            pairs.emplace_back(noteTimes[i], noteHz[i]);
+    std::stable_sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& p : pairs) { c->noteT.push_back(p.first); c->noteHz.push_back(p.second); }
+
+    delete retiredChart.exchange(nullptr, std::memory_order_acq_rel);   // freed off the audio thread
+    delete pendingChart.exchange(c, std::memory_order_acq_rel);        // never adopted: drop it
+}
+
+void DropTuner::clearChart()
+{
+    setChart({}, {}, {}, {});
+}
+
+void DropTuner::setClock(double songTime, bool playing) noexcept
+{
+    if (!std::isfinite(songTime)) return;
+    clockTime.store(songTime, std::memory_order_relaxed);
+    clockPlaying.store(playing, std::memory_order_relaxed);
+    clockGen.fetch_add(1, std::memory_order_release);
+}
+
+void DropTuner::adoptPendingChart() noexcept
+{
+    // Only while the previous retired chart has been collected, so nothing leaks.
+    if (retiredChart.load(std::memory_order_acquire) != nullptr) return;
+    Chart* next = pendingChart.exchange(nullptr, std::memory_order_acq_rel);
+    if (next == nullptr) return;
+    retiredChart.store(chart, std::memory_order_release);
+    chart = next;
+    hint = 0.0;
+    sincePluck = kNoPluck;
+    lastSongTime = -1e300;
+}
+
+void DropTuner::syncChartTo(double songTime) noexcept
+{
+    const auto& st = chart->shiftT;
+    shiftIdx = 0;
+    if (! st.empty())
+    {
+        const auto it = std::upper_bound(st.begin(), st.end(), songTime);
+        shiftIdx = it == st.begin() ? 0 : (size_t) (it - st.begin()) - 1;
+    }
+    const auto& nt = chart->noteT;
+    nextNote = (size_t) (std::upper_bound(nt.begin(), nt.end(), songTime + kPrimeLeadSec) - nt.begin());
+}
+
+bool DropTuner::onsetStep(float v) noexcept
+{
+    const double a = std::abs((double) v);
+    envFast = a > envFast ? a + aFast * (envFast - a) : aFast * envFast;
+    envSlow = aSlow * envSlow + (1.0 - aSlow) * a;
+    if (++sinceOnset >= onsetHoldoff && envFast > kOnsetFloor && envFast > kOnsetRatio * envSlow)
+    {
+        sinceOnset = 0;
+        ++onsetCount;
+        return true;
+    }
+    return false;
 }
 
 void DropTuner::setSemitones(float semitones) noexcept
@@ -127,33 +229,33 @@ void DropTuner::fft(std::complex<double>* a) const noexcept
     }
 }
 
-double DropTuner::estimatePeriod() noexcept
+double DropTuner::estimatePeriod(int len, int lo, int hi) noexcept
 {
-    // Most recent frameLen samples, mean removed.
-    const uint64_t start = written - (uint64_t) frameLen;
+    // Newest `len` samples, mean removed. Searches periods in [lo, hi).
+    const uint64_t start = written - (uint64_t) len;
     double mean = 0.0;
-    for (int j = 0; j < frameLen; ++j)
+    for (int j = 0; j < len; ++j)
     {
         frame[(size_t) j] = ring[(size_t) ((start + (uint64_t) j) & mask)];
         mean += frame[(size_t) j];
     }
-    mean /= frameLen;
+    mean /= len;
     double energy = 0.0;
-    for (int j = 0; j < frameLen; ++j)
+    for (int j = 0; j < len; ++j)
     {
         frame[(size_t) j] -= mean;
         energy += frame[(size_t) j] * frame[(size_t) j];
     }
-    if (std::sqrt(energy / frameLen) < kRmsFloor) return 0.0;
+    if (std::sqrt(energy / len) < kRmsFloor) return 0.0;
 
     // r(tau) = sum_{j<w} x[j] x[j+tau], via one complex FFT: pack a = x[0:w] in
     // the real part and b = x in the imaginary part, split the spectra, form
-    // conj(A)·B, inverse-transform.
-    const int w = frameLen - tauMax;
+    // conj(A)·B, inverse-transform. No wrap-around: j + tau < len <= fftSize.
+    const int w = len - hi;
     for (int k = 0; k < fftSize; ++k)
     {
         const double re = (k < w) ? frame[(size_t) k] : 0.0;
-        const double im = (k < frameLen) ? frame[(size_t) k] : 0.0;
+        const double im = (k < len) ? frame[(size_t) k] : 0.0;
         spec[(size_t) k] = { re, im };
     }
     fft(spec.data());
@@ -176,14 +278,14 @@ double DropTuner::estimatePeriod() noexcept
     fft(spec.data());
     // spec[tau].real / n == r(tau) (the conj back is irrelevant for the real part).
 
-    for (int j = 0; j < frameLen; ++j)
+    for (int j = 0; j < len; ++j)
         cumSq[(size_t) j + 1] = cumSq[(size_t) j] + frame[(size_t) j] * frame[(size_t) j];
     const double e0 = cumSq[(size_t) w];
 
     // Cumulative-mean-normalised difference function.
     double running = 0.0;
     cmnd[0] = 1.0;
-    for (int tau = 1; tau <= tauMax; ++tau)
+    for (int tau = 1; tau <= hi; ++tau)
     {
         const double r = spec[(size_t) tau].real() / n;
         const double eTau = cumSq[(size_t) (tau + w)] - cumSq[(size_t) tau];
@@ -193,11 +295,11 @@ double DropTuner::estimatePeriod() noexcept
     }
 
     int tau = -1;
-    for (int t = tauMin; t < tauMax; ++t)
+    for (int t = lo; t < hi; ++t)
     {
         if (cmnd[(size_t) t] < kYinThreshold)
         {
-            while (t + 1 < tauMax && cmnd[(size_t) t + 1] < cmnd[(size_t) t]) ++t;
+            while (t + 1 < hi && cmnd[(size_t) t + 1] < cmnd[(size_t) t]) ++t;
             tau = t;
             break;
         }
@@ -208,16 +310,100 @@ double DropTuner::estimatePeriod() noexcept
     return std::abs(den) > 1e-12 ? tau + 0.5 * (y0 - y2) / den : (double) tau;
 }
 
-void DropTuner::process(float* samples, int numSamples) noexcept
+void DropTuner::track() noexcept
 {
-    if (samples == nullptr || numSamples <= 0 || ring.empty()) return;
+    // Primed: search near the expected note first, on a window just long
+    // enough for it (less of the previous note in it). Otherwise, or if the
+    // player isn't on that note, a free search; with no pitch at all keep the
+    // expected period (0 without a chart = unvoiced, default span).
+    if (hint > 0.0)
+    {
+        const double k = std::pow(2.0, kHintRangeSemitones / 12.0);
+        const int lo = std::max(tauMin, (int) std::floor(hint / k));
+        const int hi = std::min(tauMax, (int) std::ceil(hint * k));
+        const int len = std::min(frameLen, 2 * hi);
+        // Right after a pluck that matched a chart note the window still holds
+        // the previous note, which the searches would lock onto: trust the
+        // chart until the window is mostly the new note.
+        if (sincePluck < (uint64_t) len) { period = hint; return; }
+        if (lo < hi && written >= (uint64_t) len)
+        {
+            const double p = estimatePeriod(len, lo, hi);
+            if (p > 0.0) { period = p; return; }
+        }
+    }
+    if (written >= (uint64_t) frameLen)
+    {
+        const double p = estimatePeriod(frameLen, tauMin, tauMax);
+        if (p > 0.0) { period = p; return; }
+    }
+    period = hint;
+}
 
-    const float target = requested.load(std::memory_order_relaxed);
+bool DropTuner::process(float* samples, int numSamples) noexcept
+{
+    if (samples == nullptr || numSamples <= 0 || ring.empty()) return false;
+    bool touched = false;
+
+    adoptPendingChart();
+    const uint32_t gen = clockGen.load(std::memory_order_acquire);
+    if (gen != seenClockGen)
+    {
+        seenClockGen = gen;
+        baseTime = clockTime.load(std::memory_order_relaxed);
+        basePlaying = clockPlaying.load(std::memory_order_relaxed);
+        baseWritten = written;
+        haveClock = true;
+    }
+    const float req = requested.load(std::memory_order_relaxed);
+    const bool followShifts = chart != nullptr && ! chart->shiftT.empty();
+    const bool primed = chart != nullptr && ! chart->noteT.empty();
 
     for (int i = 0; i < numSamples; ++i)
     {
-        ring[(size_t) (written & mask)] = samples[i];
+        const float in = samples[i];
+        ring[(size_t) (written & mask)] = in;
         ++written;
+        ++sincePluck;
+
+        float target = req;
+        if (followShifts || primed)
+        {
+            const double now = ! haveClock ? -1e300
+                : basePlaying ? baseTime + (double) (written - baseWritten) / sr : baseTime;
+            if (now < lastSongTime - kSeekBackSec || now > lastSongTime + kSeekForwardSec)
+                syncChartTo(now);
+            lastSongTime = now;
+            if (followShifts)
+            {
+                const auto& st = chart->shiftT;
+                while (shiftIdx + 1 < st.size() && st[shiftIdx + 1] <= now) ++shiftIdx;
+                target = chart->shiftSemis[shiftIdx];
+            }
+            if (primed)
+            {
+                const auto& nt = chart->noteT;
+                // A note is coming: splice at its expected period from the start.
+                while (nextNote < nt.size() && nt[nextNote] - kPrimeLeadSec <= now)
+                    hint = period = sr / chart->noteHz[nextNote++];
+                // A pluck near a chart note: that note, with the head right
+                // behind the input (crossfaded) so the attack isn't delayed.
+                if (onsetStep(in) && haveClock && basePlaying)
+                {
+                    const auto it = std::lower_bound(nt.begin(), nt.end(), now);
+                    size_t best = nt.size();
+                    double bestDist = kOnsetToleranceSec;
+                    if (it != nt.end() && *it - now <= bestDist) { best = (size_t) (it - nt.begin()); bestDist = *it - now; }
+                    if (it != nt.begin() && now - *(it - 1) <= bestDist) best = (size_t) (it - nt.begin()) - 1;
+                    if (best < nt.size())
+                    {
+                        hint = period = sr / chart->noteHz[best];
+                        sincePluck = 0;
+                        restartPending = true;
+                    }
+                }
+            }
+        }
 
         // A new amount takes effect between crossfades: crossfade from the
         // current head to a fresh one right behind the input (or to the dry
@@ -234,6 +420,17 @@ void DropTuner::process(float* samples, int numSamples) noexcept
             }
         }
 
+        // Restart for a matched pluck, once any running crossfade is done.
+        if (restartPending && xfadeLeft == 0)
+        {
+            restartPending = false;
+            if (active != 0.0f && delay > minDelay + 1.0)
+            {
+                newDelay = minDelay;
+                xfadeLeft = xfadeLen;
+            }
+        }
+
         // Dry passthrough: off and fully faded out. History is still recorded
         // so the next shift starts clean.
         if (active == 0.0f && xfadeLeft == 0 && delay == 0.0) continue;
@@ -241,7 +438,7 @@ void DropTuner::process(float* samples, int numSamples) noexcept
         if (active != 0.0f && ++hopCounter >= hop)
         {
             hopCounter = 0;
-            if (written >= (uint64_t) frameLen) period = estimatePeriod();
+            track();
         }
 
         const double span = spanFor(period);
@@ -276,7 +473,9 @@ void DropTuner::process(float* samples, int numSamples) noexcept
             if (--xfadeLeft == 0) delay = newDelay;
         }
         samples[i] = y;
+        touched = true;
     }
+    return touched;
 }
 
 } // namespace slopsmith

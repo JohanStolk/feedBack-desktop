@@ -185,10 +185,9 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
     if (monoSource != nullptr)
     {
         float* mono = effectiveOutputChannels > 0 ? buffer.getWritePointer(0) : inputCaptureScratch.data();
-        dropTuner.process(mono, numSamples);
         // The guitar source is mono and broadcast; keep the other channels in
         // step with the shifted ch0 (only when shifting, so bypass is untouched).
-        if (dropTuner.getSemitones() != 0.0f)
+        if (dropTuner.process(mono, numSamples))
             for (int ch = 1; ch < filledOutputChannels; ++ch)
                 buffer.copyFrom(ch, 0, buffer, 0, 0, numSamples);
     }

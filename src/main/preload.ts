@@ -263,6 +263,11 @@ const feedBackDesktopApi = {
         setMonitorKill: (kill: boolean) => ipcRenderer.invoke('audio:setMonitorKill', kill),
         setDropTuneSemitones: (semitones: number) => ipcRenderer.invoke('audio:setDropTuneSemitones', semitones),
         getDropTuneSemitones: () => ipcRenderer.invoke('audio:getDropTuneSemitones'),
+        setDropTuneChart: (chart: {
+            shiftTimes?: number[]; shiftSemis?: number[]; noteTimes?: number[]; noteHz?: number[];
+        } | null) => ipcRenderer.invoke('audio:setDropTuneChart', chart),
+        setDropTuneClock: (songTime: number, playing: boolean) =>
+            ipcRenderer.invoke('audio:setDropTuneClock', songTime, playing),
         setNoiseGate: (payload: {
             enabled: boolean;
             thresholdDb: number;
