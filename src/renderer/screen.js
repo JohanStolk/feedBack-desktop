@@ -234,6 +234,12 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         Promise.resolve(api.setDropTuneSemitones?.(semis))
             .catch((e) => console.warn('[audio-engine] magical tuning: setDropTuneSemitones failed:', e));
     }
+    // Tells the highway whether the input is shifted: the 3D highway then names
+    // notes as fingered on a standard-tuned instrument (window.feedBack.virtualTuning).
+    function publishVirtualTuning(active, mode) {
+        const bus = window.feedBack || window.slopsmith;
+        if (bus) bus.virtualTuning = { active: !!active, mode };
+    }
     function magicStatus(text) {
         const el = $('ae-drop-tune-status');
         if (!el) return;
@@ -260,9 +266,11 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         }) : null;
         if (!shifts) {
             magicSend(0);
+            publishVirtualTuning(false, 'auto');
             magicStatus('Magical tuning: waiting for a song.');
             return;
         }
+        publishVirtualTuning(shifts.some((v) => v !== 0), 'auto');
         magicStatus(magicTuningDescribe(shifts));
         if (shifts.every((v) => v === shifts[0])) { magicSend(shifts[0]); return; }
         magicSchedule = magicTuningSchedule(hw.getNotes(), hw.getChords?.(), shifts, MAGIC_LEAD_S);
@@ -288,6 +296,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         if (!magicEnabled) return;
         magicStop();
         magicSend(0);
+        publishVirtualTuning(false, 'auto');
         magicStatus('Magical tuning: waiting for a song.');
     }
     // Re-applies whatever the selector says (engine (re)start, device apply).
@@ -297,7 +306,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             magicSent = null;
             magicRefresh();
         } else {
-            await api.setDropTuneSemitones?.(Number(dropTuneSelect.value) || 0);
+            const semitones = Number(dropTuneSelect.value) || 0;
+            publishVirtualTuning(semitones !== 0, 'manual');
+            await api.setDropTuneSemitones?.(semitones);
         }
     }
     hookState.magicLifecycle = { ready: magicRefresh, stopped: magicSongStopped };
@@ -1212,6 +1223,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 dropTuneSelect.value = String(saved.dropTuneSemitones);
                 if (dropTuneSelect.value !== String(saved.dropTuneSemitones)) dropTuneSelect.value = '0';
                 // Push immediately, like monitorKill: the native default is off.
+                publishVirtualTuning(Number(dropTuneSelect.value) !== 0, 'manual');
                 try { await api.setDropTuneSemitones?.(Number(dropTuneSelect.value)); }
                 catch (e) { console.warn('[audio-engine] setDropTuneSemitones restore failed:', e); }
             }
@@ -1941,7 +1953,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const auto = dropTuneSelect.value === 'auto';
             const semitones = auto ? 0 : Number(dropTuneSelect.value) || 0;
             magicSetEnabled(auto);
-            if (!auto) await api.setDropTuneSemitones?.(semitones);
+            if (!auto) {
+                publishVirtualTuning(semitones !== 0, 'manual');
+                await api.setDropTuneSemitones?.(semitones);
+            }
             await saveAppliedDeviceSettings({ dropTuneSemitones: semitones, dropTuneAuto: auto });
         });
 
