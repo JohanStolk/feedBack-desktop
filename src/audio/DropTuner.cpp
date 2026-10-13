@@ -70,7 +70,11 @@ void DropTuner::reset() noexcept
 {
     std::fill(ring.begin(), ring.end(), 0.0f);
     written = 0;
-    delay = newDelay = minDelay;
+    // Start as a dry passthrough (head at 0, rate 1); a requested shift then
+    // crossfades in like any other change.
+    active = 0.0f;
+    rate = 1.0;
+    delay = newDelay = 0.0;
     xfadeLeft = 0;
     period = 0.0;
     hopCounter = 0;
@@ -84,7 +88,10 @@ void DropTuner::setSemitones(float semitones) noexcept
 
 float DropTuner::readAt(double d) const noexcept
 {
-    // The current sample is index written - 1; read d samples behind it.
+    // The current sample is index written - 1; read d samples behind it. An
+    // up-shift fading out the dry head drifts below 0 for a few ms: hold it at
+    // the newest sample rather than read ring slots not yet written.
+    if (d < 0.0) d = 0.0;
     const double pos = (double) (written - 1) - d;
     if (pos < 0.0) return 0.0f;
     const uint64_t i = (uint64_t) pos;
@@ -206,25 +213,32 @@ void DropTuner::process(float* samples, int numSamples) noexcept
     if (samples == nullptr || numSamples <= 0 || ring.empty()) return;
 
     const float target = requested.load(std::memory_order_relaxed);
-    if (target != active)
-    {
-        // New amount: restart the head right behind the input. A one-off glitch
-        // on a settings change is fine; no stale delay is carried over.
-        active = target;
-        rate = std::pow(2.0, active / 12.0);
-        delay = newDelay = minDelay;
-        xfadeLeft = 0;
-        period = 0.0;
-    }
-    const bool bypass = (active == 0.0f);
 
     for (int i = 0; i < numSamples; ++i)
     {
         ring[(size_t) (written & mask)] = samples[i];
         ++written;
-        if (bypass) continue;                       // history still recorded, for a clean start
 
-        if (++hopCounter >= hop)
+        // A new amount takes effect between crossfades: crossfade from the
+        // current head to a fresh one right behind the input (or to the dry
+        // signal for 0). No click, so the amount can change per note.
+        if (target != active && xfadeLeft == 0)
+        {
+            active = target;
+            rate = std::pow(2.0, active / 12.0);
+            const double head = (active == 0.0f) ? 0.0 : minDelay;
+            if (delay != head)
+            {
+                newDelay = head;
+                xfadeLeft = xfadeLen;
+            }
+        }
+
+        // Dry passthrough: off and fully faded out. History is still recorded
+        // so the next shift starts clean.
+        if (active == 0.0f && xfadeLeft == 0 && delay == 0.0) continue;
+
+        if (active != 0.0f && ++hopCounter >= hop)
         {
             hopCounter = 0;
             if (written >= (uint64_t) frameLen) period = estimatePeriod();

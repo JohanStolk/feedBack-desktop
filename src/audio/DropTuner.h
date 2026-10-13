@@ -22,6 +22,10 @@ namespace slopsmith {
 // Added latency averages about crossfade + half a span: ~14 ms on a bass at
 // -6 semitones in the offline prototype (93 % of notes within 35 cents).
 //
+// Changing the amount crossfades (~4 ms) from the current head to a fresh one,
+// so it can follow the chart note by note ("magical tuning": a per-string shift
+// for Drop D and other mixed tunings) without clicks.
+//
 // Monophonic by design: the tracker follows one pitch, so chords still shift
 // but splice less cleanly. JUCE-free so it can be unit-tested standalone.
 //
@@ -36,7 +40,8 @@ public:
     void prepare(double sampleRate);
     void reset() noexcept;
 
-    // 0 = bypass. Clamped to [-12, 12]; non-finite → 0.
+    // 0 = bypass. Clamped to [-12, 12]; non-finite → 0. Fractional values are
+    // fine (e.g. a song tuned a few cents off A440).
     void setSemitones(float semitones) noexcept;
     float getSemitones() const noexcept { return requested.load(std::memory_order_relaxed); }
 

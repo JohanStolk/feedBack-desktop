@@ -173,6 +173,98 @@ static void test_silence_stays_silent()
     CHECK(peak == 0.0, "silence in → %g out", peak);
 }
 
+// Magical tuning switches the amount per note (e.g. Drop D: -2 on the low
+// string, 0 elsewhere). A switch must crossfade, never jump.
+static double maxStep(const std::vector<float>& x, size_t from)
+{
+    double m = 0.0;
+    for (size_t i = from + 1; i < x.size(); ++i) m = std::max(m, (double) std::abs(x[i] - x[i - 1]));
+    return m;
+}
+
+static void test_switching_is_click_free()
+{
+    const double sr = 48000.0;
+    DropTuner dt;
+    dt.prepare(sr);
+    // Steady tone (no decay), so any click stands out against the waveform.
+    std::vector<float> in((size_t) (2.0 * sr));
+    for (size_t n = 0; n < in.size(); ++n)
+    {
+        double s = 0.0;
+        for (int k = 1; k <= 12; ++k) s += std::exp(-0.2 * k) / k * std::sin(2 * kPi * k * 55.0 * n / sr + 0.7 * k);
+        in[n] = (float) (0.5 * s);
+    }
+    std::vector<float> out = in;
+    // Starts dry: the tone begins at full amplitude, so a delayed head at t=0
+    // would read silence from before the stream and "click" by construction.
+    // 0 -> +3 covers an up-shift starting from the dry head.
+    const float pattern[] = { 0.0f, -2.0f, 0.0f, 3.0f, -6.0f, -2.0f, 3.0f, 0.0f, -1.0f, -7.0f };
+    const size_t patternLen = sizeof(pattern) / sizeof(pattern[0]);
+    const int block = 128;
+    const size_t switchEvery = (size_t) (0.1 * sr) / (size_t) block * (size_t) block;
+    size_t k = 0;
+    for (size_t i = 0; i < out.size(); i += (size_t) block)
+    {
+        if (i % switchEvery == 0) dt.setSemitones(pattern[k++ % patternLen]);
+        dt.process(out.data() + i, (int) std::min((size_t) block, out.size() - i));
+    }
+    // A hard jump between two heads would step by up to the peak-to-peak
+    // amplitude (~1.0); the waveform's own steepest step is far smaller.
+    const double limit = 1.5 * maxStep(in, 0);
+    const double got = maxStep(out, 0);
+    if (got > limit)
+        for (size_t i = 1; i < out.size(); ++i)
+            if (std::abs(out[i] - out[i - 1]) > limit)
+            {
+                std::fprintf(stderr, "  first big step at %.4f s (segment %zu)\n", i / sr, i / switchEvery);
+                break;
+            }
+    CHECK(got <= limit, "largest step %.4f exceeds %.4f (input's own max x1.5)", got, limit);
+}
+
+static void test_back_to_zero_is_dry()
+{
+    const double sr = 48000.0;
+    DropTuner dt;
+    dt.prepare(sr);
+    const auto in = bassNote(41.2, 1.2, sr);
+    std::vector<float> out = in;
+    const size_t half = (size_t) (0.5 * sr) / 256 * 256;
+    dt.setSemitones(-6.0f);
+    for (size_t i = 0; i < half; i += 256) dt.process(out.data() + i, 256);
+    dt.setSemitones(0.0f);
+    for (size_t i = half; i < out.size(); i += 256)
+        dt.process(out.data() + i, (int) std::min((size_t) 256, out.size() - i));
+    // After the 4 ms crossfade (plus at most one splice crossfade it had to
+    // finish first) the signal is the untouched input again.
+    const size_t from = half + (size_t) (0.02 * sr);
+    bool same = true;
+    for (size_t i = from; i < in.size(); ++i) same = same && in[i] == out[i];
+    CHECK(same, "switching back to 0 must end in the dry signal");
+    CHECK(dt.getDelaySamples() == 0.0, "delay after switching off: %g", dt.getDelaySamples());
+}
+
+static void test_switch_follows_new_amount()
+{
+    const double sr = 48000.0;
+    DropTuner dt;
+    dt.prepare(sr);
+    const auto in = bassNote(55.0, 1.6, sr);
+    std::vector<float> out = in;
+    const size_t half = (size_t) (0.4 * sr) / 256 * 256;
+    dt.setSemitones(-6.0f);
+    for (size_t i = 0; i < out.size(); i += 256)
+    {
+        if (i == half) dt.setSemitones(-2.0f);
+        dt.process(out.data() + i, (int) std::min((size_t) 256, out.size() - i));
+    }
+    const double expected = 55.0 * std::pow(2.0, -2.0 / 12.0);
+    const double got = measureHz(out, (size_t) (0.6 * sr), (size_t) (1.0 * sr), sr, expected / 1.5, expected * 1.5);
+    CHECK(got > 0.0 && std::abs(cents(got, expected)) < 10.0,
+          "after -6 -> -2: expected %.2f Hz, got %.2f Hz", expected, got);
+}
+
 int main()
 {
     test_bypass_is_identity();
@@ -185,6 +277,9 @@ int main()
     test_block_size_independent();
     test_clamping();
     test_silence_stays_silent();
+    test_switching_is_click_free();
+    test_back_to_zero_is_dry();
+    test_switch_follows_new_amount();
     if (failures == 0) std::printf("drop_tuner_test: all checks passed\n");
     return failures == 0 ? 0 : 1;
 }

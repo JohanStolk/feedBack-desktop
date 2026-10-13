@@ -26,6 +26,8 @@ type AudioDeviceSettings = {
     monitorMute?: boolean;
     monitorKill?: boolean;
     dropTuneSemitones?: number;
+    // Magical tuning: the shift follows each song's tuning (renderer-driven).
+    dropTuneAuto?: boolean;
     savedAt?: number;
 };
 
@@ -93,6 +95,9 @@ function normalizeDeviceSettings(settings: unknown): AudioDeviceSettings | null 
     const dropTune = Number(record.dropTuneSemitones);
     if (record.dropTuneSemitones !== undefined && Number.isFinite(dropTune)) {
         normalized.dropTuneSemitones = Math.max(-12, Math.min(12, Math.round(dropTune)));
+    }
+    if (typeof record.dropTuneAuto === 'boolean') {
+        normalized.dropTuneAuto = record.dropTuneAuto;
     }
     const savedAt = Number(record.savedAt);
     if (Number.isFinite(savedAt) && savedAt > 0) {

@@ -55,6 +55,7 @@
                 <label for="ae-drop-tune" class="block text-xs text-slate-400 mb-1">Virtual drop tuning</label>
                 <select id="ae-drop-tune" class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm">
                     <option value="0">Off</option>
+                    <option value="auto">✨ Magical — match each song's tuning</option>
                     <option value="-1">−1 semitone (E → Eb)</option>
                     <option value="-2">−2 semitones (E → D)</option>
                     <option value="-3">−3 semitones (E → C#)</option>
@@ -63,7 +64,8 @@
                     <option value="-6">−6 semitones (E → Bb)</option>
                     <option value="-7">−7 semitones (E → A)</option>
                 </select>
-                <span class="text-xs text-slate-500">(play in standard tuning and hear — and score — a lower tuning; experimental, single notes work best, adds ~15 ms)</span>
+                <span class="text-xs text-slate-500">(play in standard tuning and hear — and score — a lower tuning; experimental, single notes work best, adds ~15 ms. Magical reads the tuning of the song you play, and shifts per note for Drop D and other mixed tunings.)</span>
+                <div id="ae-drop-tune-status" class="text-xs text-emerald-400 mt-1 hidden"></div>
             </div>
             <div class="md:col-span-2">
                 <label class="flex items-center gap-2 cursor-pointer">

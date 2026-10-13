@@ -127,9 +127,190 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             inputChannel: inputChannelSelect.value,
             monitorMute: monitorMuteCheckbox.checked,
             monitorKill: monitorKillCheckbox.checked,
-            dropTuneSemitones: dropTuneSelect ? Number(dropTuneSelect.value) || 0 : 0,
+            dropTuneSemitones: dropTuneSelect && dropTuneSelect.value !== 'auto' ? Number(dropTuneSelect.value) || 0 : 0,
+            dropTuneAuto: dropTuneSelect ? dropTuneSelect.value === 'auto' : false,
         };
     }
+
+    // ── Magical tuning ────────────────────────────────────────────────────────
+    // Virtual drop tuning that follows the song: the shift comes from the
+    // arrangement's tuning instead of a fixed choice. Uniform tunings (Eb, D,
+    // B standard…) get one shift for the song; mixed ones (Drop D…) switch per
+    // note from the chart, since the engine only hears one mono input and can't
+    // tell strings apart. Assumes the instrument is in standard tuning: the
+    // working-tuning state can't be used, because the tuner hears the already
+    // shifted signal and would report the song's tuning back.
+    //
+    // MAGIC-PURE-BEGIN — pure helpers, loaded by tests/magic-tuning.test.js.
+    // Per-string shift (semitones, low string first) for an instrument in
+    // standard tuning: the arrangement's offset plus centOffset (−1200 = the
+    // octave-down bass convention). null when there's no usable tuning.
+    function magicTuningShifts(song) {
+        if (!song || !Array.isArray(song.tuning)) return null;
+        const declared = Number(song.stringCount);
+        const sc = Number.isInteger(declared) && declared > 0 ? declared : song.tuning.length;
+        if (!sc) return null;
+        const cents = Number(song.centOffset);
+        const base = Number.isFinite(cents) ? cents / 100 : 0;
+        const shifts = [];
+        for (let s = 0; s < sc; s++) {
+            const off = Number(song.tuning[s]);
+            const v = Math.round(((Number.isFinite(off) ? off : 0) + base) * 100) / 100;
+            shifts.push(Math.max(-12, Math.min(12, v)) || 0);   // `|| 0` folds -0
+        }
+        return shifts;
+    }
+
+    // Change points [{t, semis}] for a chart, sorted by time; the first is at
+    // -Infinity. A note asks for its string's shift; a chord for its lowest
+    // string's (the root). A change lands `lead` s before the note that needs
+    // it, but not before halfway from the previous note, which keeps its shift
+    // for most of its length.
+    function magicTuningSchedule(notes, chords, shifts, lead) {
+        const shiftOf = (s) => (Number.isInteger(s) && s >= 0 && s < shifts.length) ? shifts[s] : null;
+        const events = [];
+        for (const n of notes || []) {
+            const v = n ? shiftOf(n.s) : null;
+            if (v !== null && Number.isFinite(n.t)) events.push({ t: n.t, semis: v });
+        }
+        for (const c of chords || []) {
+            if (!c || !Number.isFinite(c.t) || !Array.isArray(c.notes)) continue;
+            let low = null;
+            for (const cn of c.notes) {
+                if (cn && Number.isInteger(cn.s) && (low === null || cn.s < low)) low = cn.s;
+            }
+            const v = shiftOf(low);
+            if (v !== null) events.push({ t: c.t, semis: v });
+        }
+        events.sort((a, b) => a.t - b.t);
+        const out = [];
+        let prevT = -Infinity;
+        for (const e of events) {
+            if (!out.length) out.push({ t: -Infinity, semis: e.semis });
+            else if (e.semis !== out[out.length - 1].semis) {
+                out.push({ t: Math.max(e.t - lead, (prevT + e.t) / 2), semis: e.semis });
+            }
+            prevT = e.t;
+        }
+        return out;
+    }
+
+    // Index of the change point in effect at time t. `hint` (the previous
+    // answer) makes normal playback O(1); seeks fall back to a binary search.
+    function magicTuningIndexAt(schedule, t, hint) {
+        const n = schedule.length;
+        const fits = (i) => i >= 0 && i < n && schedule[i].t <= t && (i + 1 >= n || schedule[i + 1].t > t);
+        if (fits(hint)) return hint;
+        if (fits(hint + 1)) return hint + 1;
+        let lo = 0, hi = n - 1;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (schedule[mid].t <= t) lo = mid; else hi = mid - 1;
+        }
+        return lo;
+    }
+
+    function magicTuningDescribe(shifts) {
+        const fmt = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v);
+        if (shifts.every((v) => v === 0)) return 'This song is in standard tuning: no shift.';
+        if (shifts.every((v) => v === shifts[0])) {
+            return `This song: ${fmt(shifts[0])} semitone${Math.abs(shifts[0]) === 1 ? '' : 's'} on all strings.`;
+        }
+        return `This song: per note, ${shifts.map(fmt).join(' / ')} (low → high string).`;
+    }
+    // MAGIC-PURE-END
+
+    const MAGIC_LEAD_S = 0.06;
+    let magicEnabled = false;
+    let magicSchedule = null;
+    let magicIdx = 0;
+    let magicSent = null;      // last value sent to the engine (avoids per-frame IPC)
+    if (hookState.magicRaf) cancelAnimationFrame(hookState.magicRaf);   // re-evaluation
+    hookState.magicRaf = 0;
+
+    function magicSend(semis) {
+        if (semis === magicSent) return;
+        magicSent = semis;
+        Promise.resolve(api.setDropTuneSemitones?.(semis))
+            .catch((e) => console.warn('[audio-engine] magical tuning: setDropTuneSemitones failed:', e));
+    }
+    function magicStatus(text) {
+        const el = $('ae-drop-tune-status');
+        if (!el) return;
+        el.textContent = text || '';
+        el.classList.toggle('hidden', !text);
+    }
+    function magicStop() {
+        if (hookState.magicRaf) cancelAnimationFrame(hookState.magicRaf);
+        hookState.magicRaf = 0;
+        magicSchedule = null;
+    }
+    // (Re)read the loaded song and start following it. Called when a song's
+    // chart is ready, on arrangement changes, and when Magical is selected.
+    function magicRefresh() {
+        magicStop();
+        if (!magicEnabled) { magicStatus(''); return; }
+        const hw = window.highway;
+        const loaded = hw && typeof hw.getTuning === 'function' && Array.isArray(hw.getNotes?.())
+            && (hw.getNotes().length > 0 || (hw.getChords?.() || []).length > 0);
+        const shifts = loaded ? magicTuningShifts({
+            tuning: hw.getTuning(),
+            stringCount: hw.getStringCount?.(),
+            centOffset: hw.getCentOffset?.(),
+        }) : null;
+        if (!shifts) {
+            magicSend(0);
+            magicStatus('Magical tuning: waiting for a song.');
+            return;
+        }
+        magicStatus(magicTuningDescribe(shifts));
+        if (shifts.every((v) => v === shifts[0])) { magicSend(shifts[0]); return; }
+        magicSchedule = magicTuningSchedule(hw.getNotes(), hw.getChords?.(), shifts, MAGIC_LEAD_S);
+        if (!magicSchedule.length) { magicSend(0); return; }
+        magicIdx = 0;
+        const tick = () => {
+            hookState.magicRaf = requestAnimationFrame(tick);
+            const t = Number(hw.getTime?.());
+            if (!Number.isFinite(t) || !magicSchedule) return;
+            magicIdx = magicTuningIndexAt(magicSchedule, t, magicIdx);
+            magicSend(magicSchedule[magicIdx].semis);
+        };
+        tick();
+        console.info('[audio-engine] magical tuning: per-note shifts', shifts, '-', magicSchedule.length, 'changes');
+    }
+    function magicSetEnabled(on) {
+        magicEnabled = !!on;
+        magicSent = null;
+        if (magicEnabled) magicRefresh();
+        else { magicStop(); magicStatus(''); }
+    }
+    function magicSongStopped() {
+        if (!magicEnabled) return;
+        magicStop();
+        magicSend(0);
+        magicStatus('Magical tuning: waiting for a song.');
+    }
+    // Re-applies whatever the selector says (engine (re)start, device apply).
+    async function applyDropTuneSetting() {
+        if (!dropTuneSelect) return;
+        if (dropTuneSelect.value === 'auto') {
+            magicSent = null;
+            magicRefresh();
+        } else {
+            await api.setDropTuneSemitones?.(Number(dropTuneSelect.value) || 0);
+        }
+    }
+    hookState.magicLifecycle = { ready: magicRefresh, stopped: magicSongStopped };
+    (function installMagicLifecycle() {
+        const bus = window.feedBack || window.slopsmith;
+        if (hookState.magicLifecycleInstalled || !bus || typeof bus.on !== 'function') return;
+        hookState.magicLifecycleInstalled = true;
+        // song:ready fires once the whole chart has arrived, also after an
+        // arrangement switch (the highway reloads the chart).
+        bus.on('song:ready', () => hookState.magicLifecycle?.ready?.());
+        bus.on('song:stop', () => hookState.magicLifecycle?.stopped?.());
+        bus.on('song:ended', () => hookState.magicLifecycle?.stopped?.());
+    })();
 
     function cloneDeviceSettings(settings) {
         return { ...(settings || {}) };
@@ -192,6 +373,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         if (settings.dropTuneSemitones !== undefined && Number.isFinite(dropTune)) {
             normalized.dropTuneSemitones = Math.max(-12, Math.min(12, Math.round(dropTune)));
         }
+        if (typeof settings.dropTuneAuto === 'boolean') normalized.dropTuneAuto = settings.dropTuneAuto;
         const savedAt = Number(settings.savedAt);
         if (Number.isFinite(savedAt) && savedAt > 0) normalized.savedAt = savedAt;
         return normalized;
@@ -1023,7 +1205,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 try { await api.setMonitorKill?.(saved.monitorKill); }
                 catch (e) { console.warn('[audio-engine] setMonitorKill restore failed:', e); }
             }
-            if (saved.dropTuneSemitones !== undefined && dropTuneSelect) {
+            if (saved.dropTuneAuto === true && dropTuneSelect) {
+                dropTuneSelect.value = 'auto';
+                magicSetEnabled(true);
+            } else if (saved.dropTuneSemitones !== undefined && dropTuneSelect) {
                 dropTuneSelect.value = String(saved.dropTuneSemitones);
                 if (dropTuneSelect.value !== String(saved.dropTuneSemitones)) dropTuneSelect.value = '0';
                 // Push immediately, like monitorKill: the native default is off.
@@ -1702,7 +1887,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 if (Number.isFinite(inputChannel)) await api.setInputChannel(inputChannel);
                 await api.setMonitorMute(monitorMuteCheckbox.checked);
                 await api.setMonitorKill?.(monitorKillCheckbox.checked);
-                if (dropTuneSelect) await api.setDropTuneSemitones?.(Number(dropTuneSelect.value) || 0);
+                await applyDropTuneSetting();
                 await api.startAudio();
                 audioRunning = true;
                 toggleBtn.textContent = 'Stop';
@@ -1750,11 +1935,14 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         });
 
         // Virtual drop tuning — shifts the instrument before the detectors and
-        // the tone chain (see src/audio/DropTuner.h). Applies live.
+        // the tone chain (see src/audio/DropTuner.h). Applies live. "auto" is
+        // Magical tuning: the shift follows the loaded song.
         dropTuneSelect?.addEventListener('change', async () => {
-            const semitones = Number(dropTuneSelect.value) || 0;
-            await api.setDropTuneSemitones?.(semitones);
-            await saveAppliedDeviceSettings({ dropTuneSemitones: semitones });
+            const auto = dropTuneSelect.value === 'auto';
+            const semitones = auto ? 0 : Number(dropTuneSelect.value) || 0;
+            magicSetEnabled(auto);
+            if (!auto) await api.setDropTuneSemitones?.(semitones);
+            await saveAppliedDeviceSettings({ dropTuneSemitones: semitones, dropTuneAuto: auto });
         });
 
         // Use in-app amp sims (feedBack-desktop#46) — persists the opt-in to core
