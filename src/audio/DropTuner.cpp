@@ -16,6 +16,11 @@ constexpr double kXfadeMs = 4.0;
 constexpr double kDefaultSpanMs = 20.0;
 constexpr double kMinSpanMs = 8.0;
 constexpr double kHopMs = 5.3;         // tracker update interval (~256 samples @ 48 kHz)
+// Pitch analysis runs on a lowpassed, decimated copy at about this rate: bass
+// fundamentals stop at kFmax, so ~11-12 kHz keeps every harmonic YIN needs
+// while its frames (and FFT) shrink 4x at 44.1/48 kHz, 8x at 88.2/96 kHz.
+constexpr double kAnalysisRateHz = 11000.0;
+constexpr int kDecimTapsPerFactor = 8;  // FIR length = 8 * factor + 1
 constexpr double kPrimeLeadSec = 0.010; // load a note's expected period this early
 constexpr double kOnsetToleranceSec = 0.080; // a pluck this close to a chart note is that note
 constexpr double kHintRangeSemitones = 1.5;  // primed search: expected note ± this
@@ -44,18 +49,44 @@ void DropTuner::prepare(double sampleRate)
     aSlow = std::exp(-1.0 / (0.050 * sr));
     onsetHoldoff = std::max(1, (int) std::lround(kOnsetHoldoffMs * sr / 1000.0));
 
-    tauMax = (int) (sr / kFmin);
-    tauMin = std::max(2, (int) (sr / kFmax));
-    frameLen = 2 * tauMax;                          // YIN needs two periods of fmin
-    // Linear cross-correlation of the first (frameLen - tauMax) samples against
-    // the whole frame needs frameLen + tauMax points without wrap-around.
-    fftSize = (int) nextPow2((size_t) (frameLen + tauMax));
+    // Analysis path: windowed-sinc lowpass (Blackman) at 0.45 x the analysis
+    // rate, evaluated once per `decim` input samples straight from `ring`.
+    decim = std::max(1, (int) std::floor(sr / kAnalysisRateHz));
+    asr = sr / decim;
+    decimTaps.clear();
+    if (decim > 1)
+    {
+        const int taps = kDecimTapsPerFactor * decim + 1;
+        const double fc = 0.45 * asr / sr;          // cutoff, cycles per input sample
+        double sum = 0.0;
+        for (int i = 0; i < taps; ++i)
+        {
+            const double m = i - (taps - 1) / 2.0;
+            const double sinc = m == 0.0 ? 2.0 * fc : std::sin(2.0 * kPi * fc * m) / (kPi * m);
+            const double w = 0.42 - 0.5 * std::cos(2.0 * kPi * i / (taps - 1)) + 0.08 * std::cos(4.0 * kPi * i / (taps - 1));
+            decimTaps.push_back((float) (sinc * w));
+            sum += sinc * w;
+        }
+        for (auto& t : decimTaps) t = (float) (t / sum);   // unity gain at DC
+    }
 
-    // History must cover the analysis frame and the largest read delay
-    // (min delay + one span + crossfade drift); spans are at most a few periods.
-    const size_t needed = (size_t) frameLen + (size_t) (minDelay + std::max(defaultSpan, minSpan + tauMax) * 2.0) + 4096;
+    // YIN sizes, in analysis samples.
+    tauMax = (int) (asr / kFmin);
+    tauMin = std::max(2, (int) (asr / kFmax));
+    frameLen = 2 * tauMax;                          // YIN needs two periods of fmin
+    // The packed correlation in estimatePeriod() has no wrap-around as long as
+    // the FFT covers the frame (j + tau < len <= fftSize).
+    fftSize = (int) nextPow2((size_t) frameLen);
+
+    // Input history must cover the largest read delay (min delay + one span +
+    // crossfade drift; spans are at most a few periods) and the decimation FIR.
+    const double tauMaxIn = (double) tauMax * decim;
+    const size_t needed = (size_t) (minDelay + std::max(defaultSpan, minSpan + tauMaxIn) * 2.0)
+                        + decimTaps.size() + 4096;
     ring.assign(nextPow2(needed), 0.0f);
     mask = (uint64_t) ring.size() - 1;
+    aring.assign(nextPow2((size_t) frameLen + 64), 0.0f);
+    amask = (uint64_t) aring.size() - 1;
 
     frame.assign((size_t) frameLen, 0.0);
     cumSq.assign((size_t) frameLen + 1, 0.0);
@@ -81,6 +112,9 @@ void DropTuner::reset() noexcept
 {
     std::fill(ring.begin(), ring.end(), 0.0f);
     written = 0;
+    std::fill(aring.begin(), aring.end(), 0.0f);
+    aWritten = 0;
+    decimPhase = 0;
     // Start as a dry passthrough (head at 0, rate 1); a requested shift then
     // crossfades in like any other change.
     active = 0.0f;
@@ -231,12 +265,13 @@ void DropTuner::fft(std::complex<double>* a) const noexcept
 
 double DropTuner::estimatePeriod(int len, int lo, int hi) noexcept
 {
-    // Newest `len` samples, mean removed. Searches periods in [lo, hi).
-    const uint64_t start = written - (uint64_t) len;
+    // Newest `len` analysis samples, mean removed. Searches periods in
+    // [lo, hi), all in analysis samples.
+    const uint64_t start = aWritten - (uint64_t) len;
     double mean = 0.0;
     for (int j = 0; j < len; ++j)
     {
-        frame[(size_t) j] = ring[(size_t) ((start + (uint64_t) j) & mask)];
+        frame[(size_t) j] = aring[(size_t) ((start + (uint64_t) j) & amask)];
         mean += frame[(size_t) j];
     }
     mean /= len;
@@ -316,26 +351,29 @@ void DropTuner::track() noexcept
     // enough for it (less of the previous note in it). Otherwise, or if the
     // player isn't on that note, a free search; with no pitch at all keep the
     // expected period (0 without a chart = unvoiced, default span).
+    // `hint` and `period` are in input samples; the search runs in analysis
+    // samples (decim x fewer).
     if (hint > 0.0)
     {
         const double k = std::pow(2.0, kHintRangeSemitones / 12.0);
-        const int lo = std::max(tauMin, (int) std::floor(hint / k));
-        const int hi = std::min(tauMax, (int) std::ceil(hint * k));
+        const double hintA = hint / decim;
+        const int lo = std::max(tauMin, (int) std::floor(hintA / k));
+        const int hi = std::min(tauMax, (int) std::ceil(hintA * k));
         const int len = std::min(frameLen, 2 * hi);
         // Right after a pluck that matched a chart note the window still holds
         // the previous note, which the searches would lock onto: trust the
         // chart until the window is mostly the new note.
-        if (sincePluck < (uint64_t) len) { period = hint; return; }
-        if (lo < hi && written >= (uint64_t) len)
+        if (sincePluck < (uint64_t) len * (uint64_t) decim) { period = hint; return; }
+        if (lo < hi && aWritten >= (uint64_t) len)
         {
             const double p = estimatePeriod(len, lo, hi);
-            if (p > 0.0) { period = p; return; }
+            if (p > 0.0) { period = p * decim; return; }
         }
     }
-    if (written >= (uint64_t) frameLen)
+    if (aWritten >= (uint64_t) frameLen)
     {
         const double p = estimatePeriod(frameLen, tauMin, tauMax);
-        if (p > 0.0) { period = p; return; }
+        if (p > 0.0) { period = p * decim; return; }
     }
     period = hint;
 }
@@ -365,6 +403,25 @@ bool DropTuner::process(float* samples, int numSamples) noexcept
         ring[(size_t) (written & mask)] = in;
         ++written;
         ++sincePluck;
+        // Analysis copy: one lowpassed sample per `decim` input samples. Only
+        // needed while shifting (the tracker is idle in passthrough), but kept
+        // current anyway so a shift that starts mid-note has history.
+        if (++decimPhase >= decim)
+        {
+            decimPhase = 0;
+            float a = in;
+            if (! decimTaps.empty())
+            {
+                const size_t taps = decimTaps.size();
+                double acc = 0.0;
+                if (written >= taps)
+                    for (size_t t = 0; t < taps; ++t)
+                        acc += decimTaps[t] * ring[(size_t) ((written - 1 - t) & mask)];
+                a = (float) acc;
+            }
+            aring[(size_t) (aWritten & amask)] = a;
+            ++aWritten;
+        }
 
         float target = req;
         if (followShifts || primed)

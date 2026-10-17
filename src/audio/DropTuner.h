@@ -97,7 +97,8 @@ private:
         std::vector<float> noteHz;
     };
 
-    // YIN on the newest `len` samples; best period in [lo, hi] samples, 0 = none.
+    // YIN on the newest `len` analysis samples; best period in [lo, hi)
+    // analysis samples, 0 = none.
     double estimatePeriod(int len, int lo, int hi) noexcept;
     void track() noexcept;                         // one tracker hop (uses `hint`)
     bool onsetStep(float v) noexcept;
@@ -147,7 +148,15 @@ private:
     int sinceOnset = 0, onsetHoldoff = 1;
     uint32_t onsetCount = 0;
 
-    // YIN workspace (sized in prepare)
+    // Pitch analysis on a lowpassed copy decimated by `decim` (rate `asr`):
+    // frames and FFT are decim x smaller, so the per-hop burst is ~10x cheaper.
+    int decim = 1, decimPhase = 0;
+    double asr = 48000.0;
+    std::vector<float> decimTaps;                  // lowpass FIR, applied every `decim` samples
+    std::vector<float> aring;                      // analysis-rate history
+    uint64_t amask = 0, aWritten = 0;
+
+    // YIN workspace (sized in prepare), in analysis samples
     int tauMin = 2, tauMax = 2, frameLen = 4, fftSize = 8;
     std::vector<double> frame, cumSq, cmnd;
     std::vector<std::complex<double>> spec, twiddles;
