@@ -147,7 +147,10 @@ clone_slopsmith() {
 		got-feedback/feedback-plugin-multiplayer
 		got-feedback/feedback-plugin-musicxml-import
 		got-feedback/feedback-plugin-nam-tone
-		got-feedback/feedback-plugin-notedetect
+		# Personal Windows build: note detection with feedBack-plugin-notedetect#83
+		# (diagnostic pack rename) and #86 (score against the effective tuning, needed
+		# by virtual tuning's Drop D re-fret), from the JohanStolk fork.
+		JohanStolk/feedBack-plugin-notedetect@build/combined:notedetect
 		got-feedback/feedback-plugin-piano
 		got-feedback/feedback-plugin-practice
 		got-feedback/feedback-plugin-sectionmap

@@ -24,7 +24,7 @@ on:
       slopsmith_ref:
         description: "Slopsmith core ref (branch or tag) to bundle, e.g. release/v0.3.0. Defaults to main."
         required: false
-        default: main
+        default: build/combined
 
 jobs:
   build:
@@ -32,12 +32,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
-            platform: linux
-            arch: x64
-          - os: macos-14
-            platform: mac
-            arch: arm64
+          # Personal build branch: Windows only (the Mac runs from source).
           - os: windows-latest
             platform: win
             arch: x64
@@ -148,7 +143,10 @@ jobs:
           # workflow_dispatch), so fall back to main — preserving the
           # historical default-branch behaviour. clone_slopsmith() in
           # build-common.sh also defaults to main as a second safety net.
-          SLOPSMITH_REF: ${{ inputs.slopsmith_ref || 'main' }}
+          SLOPSMITH_REF: ${{ inputs.slopsmith_ref || 'build/combined' }}
+          # Core from the JohanStolk fork: note names (+ retuned/fingered options),
+          # feedBack#1107 (string-colour buttons) and #1108 (6-string bass).
+          SLOPSMITH_REPO: JohanStolk/feedBack
           # PAT with read access to the private got-feedback repos so
           # build-common.sh can clone core + the bundled plugins.
           GH_CLONE_TOKEN: ${{ secrets.FEEDBACK_CLONE_TOKEN }}
