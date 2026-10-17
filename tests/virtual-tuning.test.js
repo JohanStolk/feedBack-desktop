@@ -18,7 +18,9 @@ function loadHelpers() {
         this.magicTuningSchedule = magicTuningSchedule;
         this.magicTuningDescribe = magicTuningDescribe;
         this.virtualTuningOpenMidi = virtualTuningOpenMidi;
-        this.virtualTuningHints = virtualTuningHints;`, ctx);
+        this.virtualTuningHints = virtualTuningHints;
+        this.virtualTuningChordProfile = virtualTuningChordProfile;
+        this.virtualTuningWarning = virtualTuningWarning;`, ctx);
     return ctx;
 }
 
@@ -28,6 +30,8 @@ const {
     magicTuningDescribe: describe,
     virtualTuningOpenMidi: openMidi,
     virtualTuningHints: hints,
+    virtualTuningChordProfile: profile,
+    virtualTuningWarning: warning,
 } = loadHelpers();
 
 // vm objects come from another realm; compare as plain JSON values.
@@ -197,4 +201,44 @@ test('the Audio screen offers every fixed shift the engine and settings accept (
     // Option values must round-trip through the saved-settings normaliser
     // (Math.round + clamp to ±12) and String(), or a restore falls back to Off.
     for (const v of fixed) assert.equal(String(Math.max(-12, Math.min(12, Math.round(v)))), String(v));
+});
+
+// Guitar chord shapes as chart chords (string 0 = low E).
+const chordOf = (frets) => ({ t: 0, notes: frets.map((f, s) => (f === null ? null : { s, f })).filter(Boolean) });
+const E5 = chordOf([0, 2, 2, null, null, null]);          // E B E
+const A5 = chordOf([null, 0, 2, 2, null, null]);          // A E A
+const C = chordOf([null, 3, 2, 0, 1, 0]);                 // C E G C E
+const Am = chordOf([null, 0, 2, 2, 1, 0]);                // A E A C E
+const D5drop = chordOf([0, 0, 0, null, null, null]);      // Drop D: D A D
+const guitarStd = { tuning: [0, 0, 0, 0, 0, 0], stringCount: 6, isBass: false };
+const dropD = { tuning: [-2, 0, 0, 0, 0, 0], stringCount: 6, isBass: false };
+
+test('chord profile: power chords are clean, chords with a 3rd are full', () => {
+    const per = [-6, -6, -6, -6, -6, -6];
+    assert.deepEqual(plain(profile([E5, A5, E5], guitarStd, per)), { total: 3, full: 0, split: 0 });
+    assert.deepEqual(plain(profile([C, Am, E5], guitarStd, per)), { total: 3, full: 2, split: 0 });
+    // Muted notes don't count; a "chord" with fewer than two pitched notes is skipped.
+    const mutedC = { t: 0, notes: [{ s: 1, f: 3 }, { s: 2, f: 2, mt: true }, { s: 3, f: 0, fhm: true }] };
+    assert.deepEqual(plain(profile([mutedC], guitarStd, per)), { total: 0, full: 0, split: 0 });
+});
+
+test('chord profile: a Drop D power chord across the low strings is split', () => {
+    const per = [-2, 0, 0, 0, 0, 0];
+    const p = plain(profile([D5drop, A5], dropD, per));
+    assert.equal(p.total, 2);
+    assert.equal(p.split, 1);       // D5 spans the -2 low string and 0-shift strings
+    assert.equal(p.full, 0);        // D A D in Drop D is still a power chord
+});
+
+test('warnings: only for big shifts with many full chords, or many split chords', () => {
+    const many = (c, n) => Array.from({ length: n }, () => c);
+    const big = [-6, -6, -6, -6, -6, -6], small = [-2, -2, -2, -2, -2, -2];
+    const fullHeavy = profile([...many(C, 10), ...many(E5, 20)], guitarStd, big);   // 33 % full
+    assert.match(warning(fullHeavy, big), /33% of the chords are full chords; at 6 semitones/);
+    assert.equal(warning(profile([...many(C, 10), ...many(E5, 20)], guitarStd, small), small), '');
+    assert.equal(warning(profile([...many(C, 2), ...many(E5, 28)], guitarStd, big), big), '');   // 7 %: fine
+    assert.equal(warning(profile(many(C, 5), guitarStd, big), big), '');            // too few chords to judge
+    const dd = [-2, 0, 0, 0, 0, 0];
+    assert.match(warning(profile([...many(D5drop, 10), ...many(A5, 20)], dropD, dd), dd),
+        /33% of the chords span strings with different shifts.*Tune those strings down/);
 });

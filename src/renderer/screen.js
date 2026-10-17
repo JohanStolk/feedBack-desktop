@@ -255,6 +255,57 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         };
     }
 
+    // Chord make-up of a chart, for the limitation warnings. `full`: chords
+    // with a 3rd or dissonant intervals (2nds, 7ths, tritones), which splice
+    // less cleanly at big shifts; power chords (4ths/5ths) and octaves stay
+    // clean. `split`: chords across strings with different shifts (a Drop D
+    // power chord on the low strings), which get their lowest string's shift
+    // for every note, so their upper notes come out wrong.
+    function virtualTuningChordProfile(chords, song, perString) {
+        const sc = perString.length;
+        const open = virtualTuningOpenMidi(sc, !!song.isBass);
+        const tuning = Array.isArray(song.tuning) ? song.tuning : [];
+        const capo = Number.isFinite(Number(song.capo)) ? Number(song.capo) : 0;
+        let total = 0, full = 0, split = 0;
+        for (const c of chords || []) {
+            if (!c || !Array.isArray(c.notes)) continue;
+            const pitches = [], shifts = new Set();
+            for (const n of c.notes) {
+                if (!n || n.mt || n.fhm || !Number.isInteger(n.s) || n.s < 0 || n.s >= sc
+                    || open[n.s] === undefined || !Number.isFinite(n.f) || n.f < 0) continue;
+                const off = Number(tuning[n.s]);
+                pitches.push(open[n.s] + (Number.isFinite(off) ? off : 0) + n.f + (n.f === 0 ? capo : 0));
+                shifts.add(perString[n.s]);
+            }
+            if (pitches.length < 2) continue;
+            total++;
+            const lo = Math.min(...pitches);
+            if (pitches.some((p) => ![0, 5, 7].includes((((Math.round(p - lo)) % 12) + 12) % 12))) full++;
+            if (shifts.size > 1) split++;
+        }
+        return { total, full, split };
+    }
+
+    // A note for the status line when this song hits a known limitation, or ''.
+    // Thresholds from the measurements: full chords degrade noticeably from
+    // about 3 semitones (guitar take: C major at -6 35 % vs 75 % offline).
+    function virtualTuningWarning(profile, perString) {
+        if (!profile || profile.total < 20) return '';
+        const big = Math.max(...perString.map((v) => Math.abs(v)));
+        const pct = (n) => Math.round((100 * n) / profile.total);
+        const parts = [];
+        if (profile.split && pct(profile.split) >= 10) {
+            parts.push(`⚠ ${pct(profile.split)}% of the chords span strings with different shifts `
+                + '(e.g. Drop D power chords): they get one shift for all their notes, so they sound wrong. '
+                + 'Tune those strings down for real for this song.');
+        }
+        if (big >= 3 && pct(profile.full) >= 15) {
+            parts.push(`⚠ ${pct(profile.full)}% of the chords are full chords; at ${big} semitones they can `
+                + 'sound rough (single notes and power chords stay clean). Retune (offline) gives cleaner chords.');
+        }
+        return parts.join(' ');
+    }
+
     function magicTuningDescribe(shifts) {
         const fmt = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v);
         if (shifts.every((v) => v === 0)) return 'This song is in standard tuning: no shift.';
@@ -341,7 +392,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 vtStatus('Match each song: this song has no tuning information.');
                 return;
             }
-            vtStatus(magicTuningDescribe(perString));
+            const warning = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString);
+            vtStatus([magicTuningDescribe(perString), warning].filter(Boolean).join(' '));
             publishVirtualTuning(perString.some((v) => v !== 0), 'auto');
             if (perString.every((v) => v === 0)) { vtSendSemis(0); return; }
             const schedule = magicTuningSchedule(notes, chords, perString, VT_SHIFT_LEAD_S);
@@ -353,6 +405,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const sc = Number(song.stringCount) || (Array.isArray(song.tuning) ? song.tuning.length : 0) || 6;
             perString = new Array(sc).fill(mode);
             publishVirtualTuning(true, 'manual');
+            vtStatus(virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString));
         }
         const hints = virtualTuningHints(notes, chords, song, perString);
         chart.noteTimes = hints.t;
