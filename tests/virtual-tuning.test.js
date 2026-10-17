@@ -20,7 +20,10 @@ function loadHelpers() {
         this.virtualTuningOpenMidi = virtualTuningOpenMidi;
         this.virtualTuningHints = virtualTuningHints;
         this.virtualTuningChordProfile = virtualTuningChordProfile;
-        this.virtualTuningWarning = virtualTuningWarning;`, ctx);
+        this.virtualTuningWarning = virtualTuningWarning;
+        this.virtualTuningRefretPlan = virtualTuningRefretPlan;
+        this.virtualTuningRefretChart = virtualTuningRefretChart;
+        this.virtualTuningNeedsRefret = virtualTuningNeedsRefret;`, ctx);
     return ctx;
 }
 
@@ -32,6 +35,9 @@ const {
     virtualTuningHints: hints,
     virtualTuningChordProfile: profile,
     virtualTuningWarning: warning,
+    virtualTuningRefretPlan: refretPlan,
+    virtualTuningRefretChart: refretChart,
+    virtualTuningNeedsRefret: needsRefret,
 } = loadHelpers();
 
 // vm objects come from another realm; compare as plain JSON values.
@@ -241,4 +247,46 @@ test('warnings: only for big shifts with many full chords, or many split chords'
     const dd = [-2, 0, 0, 0, 0, 0];
     assert.match(warning(profile([...many(D5drop, 10), ...many(A5, 20)], dropD, dd), dd),
         /33% of the chords span strings with different shifts.*Tune those strings down/);
+});
+
+test('re-fret plan: drop tunings become one shift plus extra frets', () => {
+    assert.deepEqual(plain(refretPlan(dropD)), { low: -2, add: [0, 2, 2, 2, 2, 2], tuning: [-2, -2, -2, -2, -2, -2] });
+    // Drop C (D standard with the low string a further whole step down).
+    assert.deepEqual(plain(refretPlan({ tuning: [-4, -2, -2, -2, -2, -2], stringCount: 6 })).add, [0, 2, 2, 2, 2, 2]);
+    // Open G (D G D G B D): every string at or above the lowest offset.
+    assert.deepEqual(plain(refretPlan({ tuning: [-2, -2, 0, 0, 0, -2], stringCount: 6 })).add, [0, 0, 2, 2, 2, 0]);
+    assert.equal(refretPlan(guitarStd), null);
+    assert.equal(refretPlan({ tuning: [-1, -1, -1, -1], stringCount: 4 }), null);
+    assert.equal(refretPlan(null), null);
+});
+
+test('re-fret chart: the one-finger Drop D power chord becomes the standard shape, same pitches', () => {
+    const plan = refretPlan(dropD);
+    const notes = [{ t: 1, s: 0, f: 3 }, { t: 2, s: 1, f: 5, sl: 7 }, { t: 3, s: 2, f: 0, mt: true }];
+    const input = { notes, allNotes: notes, chords: [D5drop], allChords: [D5drop],
+        chordTemplates: [{ name: 'D5', frets: [0, 0, 0, -1, -1, -1] }], anchors: [{ time: 0, fret: 1, width: 4 }] };
+    const out = plain(refretChart(input, plan));
+    assert.deepEqual(out.chords[0].notes.map((n) => n.f), [0, 2, 2]);                // D5: 0-2-2
+    assert.deepEqual(out.notes.map((n) => [n.f, n.sl]), [[3, undefined], [7, 9], [2, undefined]]);
+    assert.deepEqual(out.chordTemplates[0].frets, [0, 2, 2, -1, -1, -1]);            // unused strings stay -1
+    assert.equal(out.anchors[0].fret, 3);                                             // hand position follows
+    assert.deepEqual(out.tuning, [-2, -2, -2, -2, -2, -2]);
+    // Same pitches before and after: open MIDI + tuning + fret.
+    const open = [40, 45, 50, 55, 59, 64];
+    const pitch = (n, tun) => open[n.s] + tun[n.s] + n.f;
+    D5drop.notes.forEach((n, i) => assert.equal(pitch(out.chords[0].notes[i], out.tuning), pitch(n, dropD.tuning)));
+    // The input isn't modified.
+    assert.equal(D5drop.notes[1].f, 0);
+});
+
+test('re-fret is only needed where per-note shifting fails: chords across the dropped string', () => {
+    const many = (c, n) => Array.from({ length: n }, () => c);
+    assert.equal(needsRefret(dropD, [...many(D5drop, 5), ...many(A5, 20)]), true);   // 20 % split
+    assert.equal(needsRefret(dropD, many(A5, 30)), false);                           // no chord uses the low string
+    assert.equal(needsRefret(dropD, []), false);                                      // bass-style single notes
+    assert.equal(needsRefret(guitarStd, many(E5, 30)), false);                       // uniform tuning
+    // A bass Drop D line with the odd low-string double-stop stays per-note.
+    const dropDBass = { tuning: [-2, 0, 0, 0, 0, 0], stringCount: 4, isBass: true };
+    const ds = chordOf([0, 0, null, null]);
+    assert.equal(needsRefret(dropDBass, [ds, ...many(chordOf([null, 2, 2, null]), 40)]), false);
 });

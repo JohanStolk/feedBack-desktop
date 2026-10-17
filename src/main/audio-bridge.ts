@@ -28,6 +28,8 @@ type AudioDeviceSettings = {
     dropTuneSemitones?: number;
     // Magical tuning: the shift follows each song's tuning (renderer-driven).
     dropTuneAuto?: boolean;
+    // Re-fret drop tunings (chart transform) with Match each song; default on.
+    dropTuneRefret?: boolean;
     savedAt?: number;
 };
 
@@ -98,6 +100,9 @@ function normalizeDeviceSettings(settings: unknown): AudioDeviceSettings | null 
     }
     if (typeof record.dropTuneAuto === 'boolean') {
         normalized.dropTuneAuto = record.dropTuneAuto;
+    }
+    if (typeof record.dropTuneRefret === 'boolean') {
+        normalized.dropTuneRefret = record.dropTuneRefret;
     }
     const savedAt = Number(record.savedAt);
     if (Number.isFinite(savedAt) && savedAt > 0) {

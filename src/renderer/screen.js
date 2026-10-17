@@ -129,6 +129,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             monitorKill: monitorKillCheckbox.checked,
             dropTuneSemitones: dropTuneSelect && dropTuneSelect.value !== 'auto' ? Number(dropTuneSelect.value) || 0 : 0,
             dropTuneAuto: dropTuneSelect ? dropTuneSelect.value === 'auto' : false,
+            dropTuneRefret: dropTuneRefretCheckbox ? dropTuneRefretCheckbox.checked : true,
         };
     }
 
@@ -314,6 +315,77 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         }
         return `This song: per note, ${shifts.map(fmt).join(' / ')} (low → high string).`;
     }
+    // Re-fret plan for a mixed tuning (Drop D, Drop C, open tunings): one
+    // uniform shift, the most lowered string's, and per-string extra frets so
+    // standard-tuning shapes play the song's notes. Drop D: everything -2
+    // (D standard) and the upper five strings +2 frets, so the one-finger D5
+    // (0-0-0) becomes the normal 0-2-2 shape. null for a uniform tuning.
+    function virtualTuningRefretPlan(song) {
+        if (!song || !Array.isArray(song.tuning)) return null;
+        const declared = Number(song.stringCount);
+        const sc = Number.isInteger(declared) && declared > 0 ? declared : song.tuning.length;
+        if (!sc) return null;
+        const off = [];
+        for (let s = 0; s < sc; s++) {
+            const v = Number(song.tuning[s]);
+            off.push(Number.isFinite(v) ? v : 0);
+        }
+        if (off.every((v) => v === off[0])) return null;
+        const low = Math.min(...off);
+        return { low, add: off.map((v) => Math.round(v - low)), tuning: off.map(() => low) };
+    }
+
+    // The chart re-fretted by a plan, in the chart-transform output shape
+    // (core capability chart-transform): notes, chords, templates and hand
+    // positions move up; muted notes keep their (moved) fret; tuning becomes
+    // the uniform one so every consumer reads consistent frets + tuning.
+    function virtualTuningRefretChart(input, plan) {
+        const add = plan.add;
+        const most = (() => {
+            const c = new Map();
+            for (const d of add) c.set(d, (c.get(d) || 0) + 1);
+            let best = 0, n = -1;
+            for (const [d, k] of c) if (k > n) { best = d; n = k; }
+            return best;
+        })();
+        const note = (n) => {
+            if (!n || !Number.isInteger(n.s) || !add[n.s]) return n;
+            const d = add[n.s], o = { ...n };
+            if (Number.isFinite(o.f) && o.f >= 0) o.f += d;
+            if (Number.isFinite(o.sl) && o.sl >= 0) o.sl += d;
+            if (Number.isFinite(o.slu) && o.slu >= 0) o.slu += d;
+            return o;
+        };
+        const notes = (arr) => (Array.isArray(arr) ? arr.map(note) : arr);
+        const chords = (arr) => (Array.isArray(arr)
+            ? arr.map((c) => (c && Array.isArray(c.notes) ? { ...c, notes: c.notes.map(note) } : c)) : arr);
+        const out = { tuning: plan.tuning.slice() };
+        out.notes = notes(input.notes);
+        out.allNotes = input.allNotes === input.notes ? out.notes : notes(input.allNotes);
+        out.chords = chords(input.chords);
+        out.allChords = input.allChords === input.chords ? out.chords : chords(input.allChords);
+        if (Array.isArray(input.chordTemplates)) {
+            out.chordTemplates = input.chordTemplates.map((t) => (t && Array.isArray(t.frets)
+                ? { ...t, frets: t.frets.map((f, s) => (Number.isFinite(f) && f >= 0 && add[s] ? f + add[s] : f)) }
+                : t));
+        }
+        if (Array.isArray(input.anchors) && most) {
+            out.anchors = input.anchors.map((a) => (a && Number.isFinite(a.fret) ? { ...a, fret: a.fret + most } : a));
+        }
+        return out;
+    }
+
+    // Re-fret only where per-note shifting can't work: a mixed tuning whose
+    // part has chords across strings with different shifts (guitar Drop D
+    // power chords). Bass lines and single-note parts keep per-note shifts,
+    // which leave the undropped strings unshifted and clean.
+    function virtualTuningNeedsRefret(song, chords) {
+        if (!virtualTuningRefretPlan(song)) return false;
+        const per = magicTuningShifts(song);
+        if (!per) return false;
+        const prof = virtualTuningChordProfile(chords, song, per);
+        return prof.total >= 5 && prof.split / prof.total >= 0.05;
+    }
     // VT-PURE-END
 
     const VT_SHIFT_LEAD_S = 0.06;   // a per-note shift change lands this early
@@ -393,7 +465,13 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 return;
             }
             const warning = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString);
-            vtStatus([magicTuningDescribe(perString), warning].filter(Boolean).join(' '));
+            const transformed = typeof hw.getChartTransform === 'function' ? hw.getChartTransform() : null;
+            const refretPlan = transformed && transformed.id === VT_REFRET_PROVIDER ? vtRefretApplied : null;
+            const refretNote = refretPlan
+                ? `Re-fretted for its chords: ${refretPlan.add.map((d, i) => (d ? `string ${i + 1} +${d}` : null))
+                    .filter(Boolean).join(', ')} frets (as shown on the highway).`
+                : '';
+            vtStatus([magicTuningDescribe(perString), refretNote, warning].filter(Boolean).join(' '));
             publishVirtualTuning(perString.some((v) => v !== 0), 'auto');
             if (perString.every((v) => v === 0)) { vtSendSemis(0); return; }
             const schedule = magicTuningSchedule(notes, chords, perString, VT_SHIFT_LEAD_S);
@@ -443,7 +521,68 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             vtSent = mode;
             await api.setDropTuneSemitones?.(mode);
         }
+        await vtSyncRefretProvider();   // re-stages the chart (re-fret on/off)
         vtRefresh();
+    }
+    // ── Re-fret drop tunings (chart-transform provider) ───────────────────
+    const VT_REFRET_PROVIDER = 'audio_engine.virtual-tuning-refret';
+    const dropTuneRefretCheckbox = $('ae-drop-tune-refret');
+    let vtRefretApplied = null;     // the plan the last transform applied, or null
+    function vtRefretEnabled() { return dropTuneRefretCheckbox ? dropTuneRefretCheckbox.checked : true; }
+    async function vtChartTransform(command, payload) {
+        const caps = window.feedBack && window.feedBack.capabilities;
+        if (!caps || typeof caps.dispatch !== 'function') return null;
+        try {
+            return await caps.dispatch({ capability: 'chart-transform', command, source: 'audio_engine', payload: payload || {} });
+        } catch (e) {
+            console.warn(`[audio-engine] virtual tuning: chart-transform ${command} failed:`, e);
+            return null;
+        }
+    }
+    // Runs inside the highway's synchronous transform staging (chart ready,
+    // mastery change, refresh), never per frame. Stored on hookState so a
+    // re-evaluated script swaps in its fresh closure.
+    hookState.vtRefretTransform = (input) => {
+        vtRefretApplied = null;
+        if (!vtRefretEnabled() || vtMode() !== 'auto' || !input) return null;
+        const info = input.songInfo || {};
+        const song = {
+            tuning: info.tuning, stringCount: input.stringCount, centOffset: info.centOffset,
+            capo: info.capo, isBass: /bass/i.test(String(info.arrangement || '')),
+        };
+        if (!virtualTuningNeedsRefret(song, input.allChords || input.chords)) return null;
+        vtRefretApplied = virtualTuningRefretPlan(song);
+        return virtualTuningRefretChart(input, vtRefretApplied);
+    };
+    // Register once; select it while "match each song" + re-fret are on, and
+    // only clear it if it's still the active one (another plugin's transform
+    // stays untouched). Then re-stage the loaded chart. Calls are queued, so
+    // two quick setting changes can't interleave their inspect/select steps.
+    let vtSyncQueue = Promise.resolve();
+    function vtSyncRefretProvider() {
+        vtSyncQueue = vtSyncQueue.then(vtSyncRefretProviderNow, vtSyncRefretProviderNow);
+        return vtSyncQueue;
+    }
+    async function vtSyncRefretProviderNow() {
+        if (!hookState.vtRefretRegistered) {
+            const res = await vtChartTransform('register-provider', {
+                providerId: VT_REFRET_PROVIDER,
+                label: 'Virtual tuning: re-fret drop tunings',
+                transform: (input) => (hookState.vtRefretTransform ? hookState.vtRefretTransform(input) : null),
+            });
+            if (!res || res.outcome === 'degraded' || /error|no-owner|no-handler|unsupported/.test(String(res.status))) return;
+            hookState.vtRefretRegistered = true;
+        }
+        const want = vtRefretEnabled() && vtMode() === 'auto';
+        const state = await vtChartTransform('inspect');
+        const active = state && state.payload ? state.payload.active : null;
+        if (want && active !== VT_REFRET_PROVIDER) {
+            await vtChartTransform('select-provider', { providerId: VT_REFRET_PROVIDER });
+        } else if (!want && active === VT_REFRET_PROVIDER) {
+            await vtChartTransform('clear-provider');
+        }
+        if (!want) vtRefretApplied = null;
+        await vtChartTransform('refresh');
     }
     hookState.vtLifecycle = { ready: vtRefresh, stopped: vtSongStopped };
     (function installVirtualTuningLifecycle() {
@@ -519,6 +658,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             normalized.dropTuneSemitones = Math.max(-12, Math.min(12, Math.round(dropTune)));
         }
         if (typeof settings.dropTuneAuto === 'boolean') normalized.dropTuneAuto = settings.dropTuneAuto;
+        if (typeof settings.dropTuneRefret === 'boolean') normalized.dropTuneRefret = settings.dropTuneRefret;
         const savedAt = Number(settings.savedAt);
         if (Number.isFinite(savedAt) && savedAt > 0) normalized.savedAt = savedAt;
         return normalized;
@@ -1350,6 +1490,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 try { await api.setMonitorKill?.(saved.monitorKill); }
                 catch (e) { console.warn('[audio-engine] setMonitorKill restore failed:', e); }
             }
+            if (dropTuneRefretCheckbox && typeof saved.dropTuneRefret === 'boolean') {
+                dropTuneRefretCheckbox.checked = saved.dropTuneRefret;
+            }
             if (dropTuneSelect && (saved.dropTuneAuto === true || saved.dropTuneSemitones !== undefined)) {
                 if (saved.dropTuneAuto === true) {
                     dropTuneSelect.value = 'auto';
@@ -2088,6 +2231,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const semitones = auto ? 0 : Number(dropTuneSelect.value) || 0;
             await applyDropTuneSetting();
             await saveAppliedDeviceSettings({ dropTuneSemitones: semitones, dropTuneAuto: auto });
+        });
+        dropTuneRefretCheckbox?.addEventListener('change', async () => {
+            await applyDropTuneSetting();
+            await saveAppliedDeviceSettings({ dropTuneRefret: dropTuneRefretCheckbox.checked });
         });
 
         // Use in-app amp sims (feedBack-desktop#46) — persists the opt-in to core

@@ -49,6 +49,16 @@
             "version": 1,
             "description": "Hosts native low-latency audio monitoring for desktop builds."
         },
+        "chart-transform": {
+            "roles": ["provider"],
+            "operations": ["chart.transform"],
+            "mode": "active",
+            "compatibility": "none",
+            "ownership": "multi-provider",
+            "safety": "safe",
+            "version": 1,
+            "description": "Virtual tuning: re-frets drop-tuned charts (Drop D as D-standard shapes) so chords stay right."
+        },
         "playback": {
             "roles": ["observer"],
             "kind": "lifecycle",
