@@ -435,6 +435,8 @@ int main()
     test_shift_down(44100.0, 41.2, -6.0f);
     test_shift_down(96000.0, 41.2, -6.0f);
     test_shift_up();
+    test_shift_down(48000.0, 55.0, -12.0f);  // octave down: A1 → A0 (27.5 Hz)
+    test_shift_down(48000.0, 55.0, 12.0f);   // octave up:   A1 → A2
     test_block_size_independent();
     test_clamping();
     test_silence_stays_silent();

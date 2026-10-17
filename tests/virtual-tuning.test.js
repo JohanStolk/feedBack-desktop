@@ -184,3 +184,17 @@ test('setDropTuneChart / setDropTuneClock tolerate garbage', { skip: !fs.existsS
         audio.shutdown?.();
     }
 });
+
+test('the Audio screen offers every fixed shift the engine and settings accept (±12)', () => {
+    const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'screen.html'), 'utf8');
+    const select = html.slice(html.indexOf('id="ae-drop-tune"'), html.indexOf('</select>', html.indexOf('id="ae-drop-tune"')));
+    const values = [...select.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
+    const fixed = values.filter((v) => /^-?\d+$/.test(v) && v !== '0').map(Number).sort((a, b) => a - b);
+    const expected = [];
+    for (let v = -12; v <= 12; v++) if (v !== 0) expected.push(v);
+    assert.deepEqual(fixed, expected);
+    assert.ok(values.includes('0') && values.includes('auto'));
+    // Option values must round-trip through the saved-settings normaliser
+    // (Math.round + clamp to ±12) and String(), or a restore falls back to Off.
+    for (const v of fixed) assert.equal(String(Math.max(-12, Math.min(12, Math.round(v)))), String(v));
+});
