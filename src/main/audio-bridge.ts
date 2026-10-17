@@ -30,6 +30,8 @@ type AudioDeviceSettings = {
     dropTuneAuto?: boolean;
     // Re-fret drop tunings (chart transform) with Match each song; default on.
     dropTuneRefret?: boolean;
+    // Play the song (page audio) on the engine's output device; default on.
+    songFollowsOutput?: boolean;
     savedAt?: number;
 };
 
@@ -103,6 +105,9 @@ function normalizeDeviceSettings(settings: unknown): AudioDeviceSettings | null 
     }
     if (typeof record.dropTuneRefret === 'boolean') {
         normalized.dropTuneRefret = record.dropTuneRefret;
+    }
+    if (typeof record.songFollowsOutput === 'boolean') {
+        normalized.songFollowsOutput = record.songFollowsOutput;
     }
     const savedAt = Number(record.savedAt);
     if (Number.isFinite(savedAt) && savedAt > 0) {

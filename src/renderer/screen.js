@@ -130,6 +130,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             dropTuneSemitones: dropTuneSelect && dropTuneSelect.value !== 'auto' ? Number(dropTuneSelect.value) || 0 : 0,
             dropTuneAuto: dropTuneSelect ? dropTuneSelect.value === 'auto' : false,
             dropTuneRefret: dropTuneRefretCheckbox ? dropTuneRefretCheckbox.checked : true,
+            songFollowsOutput: songOutputCheckbox ? songOutputCheckbox.checked : true,
         };
     }
 
@@ -632,6 +633,87 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         bus.on('song:ended', () => hookState.vtLifecycle?.stopped?.());
     })();
 
+    // ── Song output follows the engine's output device ────────────────────────
+    // The engine plays the instrument on the device picked above; the song
+    // plays through the page's own audio (the <audio> element and the Web Audio
+    // contexts core and plugins route it through), which follows the system
+    // default output. Wherever page code asks for the default output ('' as
+    // sinkId, or a new AudioContext), use the engine's output device instead.
+    // Explicit choices are left alone: core's exclusive/ASIO path parks its
+    // context on { type: 'none' } and the engine plays the song itself there.
+    //
+    // SO-PURE-BEGIN — pure helper, loaded by tests/song-output.test.js.
+    // The page's audio-output deviceId for an engine output device name, or ''
+    // (system default) when none matches. Labels can carry a suffix
+    // ("Scarlett Solo USB (Built-in)"), so a prefix match is accepted too.
+    function songOutputDeviceId(outputs, name) {
+        const want = String(name || '').trim().toLowerCase();
+        if (!want || !Array.isArray(outputs)) return '';
+        const real = outputs.filter((d) => d && d.kind === 'audiooutput' && d.deviceId
+            && d.deviceId !== 'default' && d.deviceId !== 'communications');
+        const label = (d) => String(d.label || '').trim().toLowerCase();
+        const base = (d) => label(d).replace(/\s*\([^)]*\)\s*$/, '');
+        const hit = real.find((d) => label(d) === want) || real.find((d) => base(d) === want)
+            || real.find((d) => label(d).startsWith(want) || want.startsWith(base(d)) && base(d).length >= 4);
+        return hit ? hit.deviceId : '';
+    }
+    // SO-PURE-END
+
+    const songOutputCheckbox = $('ae-song-follows-output');
+    const songOut = hookState.songOutput || (hookState.songOutput = { id: '', contexts: [], patched: false });
+    (function installSongOutputPatch() {
+        if (songOut.patched) return;
+        songOut.patched = true;
+        const isDefault = (sinkId) => sinkId === '' || sinkId === undefined || sinkId === 'default';
+        for (const proto of [window.AudioContext && window.AudioContext.prototype,
+            window.HTMLMediaElement && window.HTMLMediaElement.prototype]) {
+            if (!proto || typeof proto.setSinkId !== 'function') continue;
+            const original = proto.setSinkId;
+            proto.setSinkId = function (sinkId, ...rest) {
+                return original.call(this, isDefault(sinkId) && songOut.id ? songOut.id : sinkId, ...rest);
+            };
+        }
+        const Native = window.AudioContext;
+        if (typeof Native === 'function') {
+            const Patched = class extends Native {
+                constructor(...args) {
+                    super(...args);
+                    songOut.contexts.push(new WeakRef(this));
+                    if (songOut.id && typeof this.setSinkId === 'function') this.setSinkId('').catch(() => {});
+                }
+            };
+            window.AudioContext = Patched;
+            if (window.webkitAudioContext === Native) window.webkitAudioContext = Patched;
+        }
+    })();
+    // Point the song at `outputName` (the engine's output), or back at the
+    // system default. Re-targets the <audio>/<video> elements and every live
+    // context still on the default output; ones parked elsewhere stay put.
+    async function songOutputApply(outputName) {
+        let id = '';
+        if (songOutputCheckbox ? songOutputCheckbox.checked : true) {
+            try {
+                const devices = await navigator.mediaDevices?.enumerateDevices?.();
+                id = songOutputDeviceId(devices || [], outputName);
+            } catch (_) { id = ''; }
+        }
+        const previous = songOut.id;
+        songOut.id = id;
+        const onDefaultOrOurs = (sinkId) => sinkId === '' || sinkId === previous || sinkId === id;
+        for (const el of document.querySelectorAll('audio, video')) {
+            if (typeof el.setSinkId === 'function' && onDefaultOrOurs(el.sinkId)) el.setSinkId('').catch(() => {});
+        }
+        songOut.contexts = songOut.contexts.filter((ref) => {
+            const ctx = ref.deref();
+            if (!ctx || ctx.state === 'closed') return false;
+            if (typeof ctx.setSinkId === 'function' && typeof ctx.sinkId === 'string' && onDefaultOrOurs(ctx.sinkId)) {
+                ctx.setSinkId('').catch(() => {});
+            }
+            return true;
+        });
+        console.info('[audio-engine] song output:', id ? `"${outputName}"` : 'system default');
+    }
+
     function cloneDeviceSettings(settings) {
         return { ...(settings || {}) };
     }
@@ -695,6 +777,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         }
         if (typeof settings.dropTuneAuto === 'boolean') normalized.dropTuneAuto = settings.dropTuneAuto;
         if (typeof settings.dropTuneRefret === 'boolean') normalized.dropTuneRefret = settings.dropTuneRefret;
+        if (typeof settings.songFollowsOutput === 'boolean') normalized.songFollowsOutput = settings.songFollowsOutput;
         const savedAt = Number(settings.savedAt);
         if (Number.isFinite(savedAt) && savedAt > 0) normalized.savedAt = savedAt;
         return normalized;
@@ -702,6 +785,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
     function rememberAppliedDeviceSettings(settings = captureDeviceSettings()) {
         lastAppliedDeviceSettings = cloneDeviceSettings(settings);
+        void songOutputApply(settings && settings.output);
         return lastAppliedDeviceSettings;
     }
 
@@ -1529,6 +1613,11 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             if (dropTuneRefretCheckbox && typeof saved.dropTuneRefret === 'boolean') {
                 dropTuneRefretCheckbox.checked = saved.dropTuneRefret;
             }
+            if (songOutputCheckbox && typeof saved.songFollowsOutput === 'boolean') {
+                songOutputCheckbox.checked = saved.songFollowsOutput;
+            }
+            // The song can follow the saved output even before Apply runs.
+            void songOutputApply(saved.output);
             if (dropTuneSelect && (saved.dropTuneAuto === true || saved.dropTuneSemitones !== undefined)) {
                 if (saved.dropTuneAuto === true) {
                     dropTuneSelect.value = 'auto';
@@ -2267,6 +2356,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const semitones = auto ? 0 : Number(dropTuneSelect.value) || 0;
             await applyDropTuneSetting();
             await saveAppliedDeviceSettings({ dropTuneSemitones: semitones, dropTuneAuto: auto });
+        });
+        songOutputCheckbox?.addEventListener('change', async () => {
+            await songOutputApply((lastAppliedDeviceSettings && lastAppliedDeviceSettings.output) || outputDeviceSelect.value);
+            await saveAppliedDeviceSettings({ songFollowsOutput: songOutputCheckbox.checked });
         });
         dropTuneRefretCheckbox?.addEventListener('change', async () => {
             await applyDropTuneSetting();

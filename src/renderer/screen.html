@@ -116,6 +116,12 @@
                 <select id="ae-output-device" class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm">
                     <option>Select device type first</option>
                 </select>
+                <label class="flex items-center gap-2 cursor-pointer mt-2">
+                    <input type="checkbox" id="ae-song-follows-output" checked
+                           class="w-4 h-4 rounded bg-slate-700 border-slate-600 accent-emerald-500">
+                    <span class="text-sm text-slate-300">Play the song on this output too</span>
+                </label>
+                <span class="text-xs text-slate-500">Otherwise the song follows the system's default output (e.g. the speakers) while your instrument plays here. ASIO/exclusive devices always play the song here.</span>
             </div>
             <div id="ae-sr-mismatch-warning" role="alert" aria-live="polite" class="md:col-span-2 hidden p-2 rounded bg-amber-900/40 border border-amber-600/40 text-xs text-amber-200">
                 Input and output devices don't share a compatible sample rate. Pick devices that both support the same rate (typical: 48000 Hz) or use the same device for both directions.
