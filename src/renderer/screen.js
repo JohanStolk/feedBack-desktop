@@ -416,11 +416,15 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // the player for this screen stops the song (core session.js), which
     // ends the per-song state below.
     let vtLastSong = null;          // { title, text }
+    let vtStatusText = '';
     function vtStatus(text) {
+        vtStatusText = text || '';
         const el = $('ae-drop-tune-status');
-        if (!el) return;
-        el.textContent = text || '';
-        el.classList.toggle('hidden', !text);
+        if (el) {
+            el.textContent = vtStatusText;
+            el.classList.toggle('hidden', !vtStatusText);
+        }
+        vtUpdatePlayerControl();
     }
     function vtClearChart() {
         if (hookState.vtRaf) cancelAnimationFrame(hookState.vtRaf);
@@ -481,6 +485,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                     .filter(Boolean).join(', ')} frets (as shown on the highway).`
                 : '';
             const autoText = [magicTuningDescribe(perString), refretNote, warning].filter(Boolean).join(' ');
+            vtShortLabel = (refretPlan ? `${vtFmtSemis(perString[0])} · re-fret`
+                : perString.every((v) => v === 0) ? 'standard'
+                : perString.every((v) => v === perString[0]) ? vtFmtSemis(perString[0]) : 'per note')
+                + (warning ? ' ⚠' : '');
             vtLastSong = { title: vtSongTitle(hw), text: autoText };
             vtStatus(autoText);
             publishVirtualTuning(perString.some((v) => v !== 0), 'auto');
@@ -494,7 +502,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const sc = Number(song.stringCount) || (Array.isArray(song.tuning) ? song.tuning.length : 0) || 6;
             perString = new Array(sc).fill(mode);
             publishVirtualTuning(true, 'manual');
-            const fixedText = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString);
+            const fixedWarning = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString);
+            vtShortLabel = `${vtFmtSemis(mode)} fixed${fixedWarning ? ' ⚠' : ''}`;
+            const fixedText = [`Fixed shift: ${vtFmtSemis(mode)} semitone${Math.abs(mode) === 1 ? '' : 's'} on all strings `
+                + '(the chart stays as written).', fixedWarning].filter(Boolean).join(' ');
             vtLastSong = fixedText ? { title: vtSongTitle(hw), text: fixedText } : null;
             vtStatus(fixedText);
         }
@@ -532,6 +543,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     }
     function vtSongStopped() {
         vtClearChart();
+        vtClosePanel();
+        vtShortLabel = '';
         if (vtMode() !== 'auto') { vtStatus(vtNoSongText(false)); return; }
         vtSendSemis(0);
         publishVirtualTuning(false, 'auto');
@@ -621,14 +634,116 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         if (!want) vtRefretApplied = null;
         await vtChartTransform('refresh');
     }
-    hookState.vtLifecycle = { ready: vtRefresh, stopped: vtSongStopped };
+    // ── Player control ───────────────────────────────────────────────────
+    // Leaving the player stops the song, so the setting can't be changed from
+    // the Audio screen mid-song. A button in the player's control bar shows
+    // what this song gets; its panel drives the Audio screen's own controls
+    // (one source of truth; saving and re-staging happen there).
+    let vtShortLabel = '';
+    function vtFmtSemis(v) { return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v); }
+    function vtPlayerLabel() {
+        const mode = vtMode();
+        if (mode === 0) return 'Tuning: off';
+        if (vtShortLabel) return `Tuning ${vtShortLabel}`;
+        return mode === 'auto' ? 'Tuning: match song' : `Tuning ${vtFmtSemis(mode)} fixed`;
+    }
+    function vtInjectPlayerControl() {
+        const controls = document.getElementById('player-controls');
+        if (!controls || !dropTuneSelect) return;
+        let btn = document.getElementById('btn-vt-tuning');
+        if (!btn) {
+            btn = document.createElement('button');
+            btn.id = 'btn-vt-tuning';
+            btn.type = 'button';
+            btn.className = 'px-3 py-1.5 rounded-lg text-xs transition';
+            btn.style.cssText = 'background:rgba(6,78,59,0.45);color:#6ee7b7;';
+            btn.title = 'Virtual tuning for this song';
+            btn.onclick = () => vtTogglePanel();
+            const closeBtn = controls.querySelector('button[onclick*="showScreen"]');
+            if (closeBtn) controls.insertBefore(btn, closeBtn); else controls.appendChild(btn);
+        }
+        vtUpdatePlayerControl();
+    }
+    function vtUpdatePlayerControl() {
+        const btn = document.getElementById('btn-vt-tuning');
+        if (btn) btn.textContent = vtPlayerLabel();
+        const panel = document.getElementById('ae-vt-panel-float');
+        if (panel) {
+            const st = panel.querySelector('[data-vt="status"]');
+            if (st) st.textContent = vtStatusText || (vtMode() === 0 ? 'Off: you hear your instrument as you play it.' : '');
+            const sel = panel.querySelector('[data-vt="mode"]');
+            if (sel && sel.value !== dropTuneSelect.value) sel.value = dropTuneSelect.value;
+            const cb = panel.querySelector('[data-vt="refret"]');
+            if (cb && dropTuneRefretCheckbox) cb.checked = dropTuneRefretCheckbox.checked;
+        }
+    }
+    function vtClosePanel() {
+        const panel = document.getElementById('ae-vt-panel-float');
+        if (panel) panel.remove();
+    }
+    function vtTogglePanel() {
+        if (document.getElementById('ae-vt-panel-float')) { vtClosePanel(); return; }
+        const player = document.getElementById('player');
+        if (!player || !dropTuneSelect) return;
+        const panel = document.createElement('div');
+        panel.id = 'ae-vt-panel-float';
+        panel.style.cssText = 'position:absolute;bottom:60px;right:12px;z-index:101;width:340px;max-height:420px;overflow-y:auto;';
+        panel.className = 'bg-slate-900 border border-slate-700 rounded-xl p-4 shadow-2xl';
+        const title = document.createElement('div');
+        title.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;';
+        title.innerHTML = '<span class="text-sm font-semibold text-slate-300">Virtual tuning</span>';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = '×';
+        close.className = 'text-slate-500 hover:text-white';
+        close.style.cssText = 'font-size:18px;line-height:1;';
+        close.onclick = vtClosePanel;
+        title.appendChild(close);
+        const sel = document.createElement('select');
+        sel.dataset.vt = 'mode';
+        sel.className = 'w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm';
+        sel.innerHTML = dropTuneSelect.innerHTML;       // same options and groups as the Audio screen
+        sel.value = dropTuneSelect.value;
+        sel.onchange = () => {
+            dropTuneSelect.value = sel.value;
+            dropTuneSelect.dispatchEvent(new Event('change'));
+        };
+        const label = document.createElement('label');
+        label.className = 'flex items-center gap-2 mt-2';
+        label.style.cursor = 'pointer';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.dataset.vt = 'refret';
+        cb.checked = dropTuneRefretCheckbox ? dropTuneRefretCheckbox.checked : true;
+        cb.onchange = () => {
+            if (!dropTuneRefretCheckbox) return;
+            dropTuneRefretCheckbox.checked = cb.checked;
+            dropTuneRefretCheckbox.dispatchEvent(new Event('change'));
+        };
+        const span = document.createElement('span');
+        span.className = 'text-sm text-slate-300';
+        span.textContent = 'Re-fret drop tunings so chords stay right';
+        label.append(cb, span);
+        const status = document.createElement('div');
+        status.dataset.vt = 'status';
+        status.className = 'text-xs text-emerald-400 mt-2';
+        panel.append(title, sel, label, status);
+        player.style.position = 'relative';
+        player.appendChild(panel);
+        vtUpdatePlayerControl();
+    }
+    hookState.vtLifecycle = { ready: vtRefresh, stopped: vtSongStopped, inject: vtInjectPlayerControl };
     (function installVirtualTuningLifecycle() {
         const bus = window.feedBack || window.slopsmith;
         if (hookState.vtLifecycleInstalled || !bus || typeof bus.on !== 'function') return;
         hookState.vtLifecycleInstalled = true;
         // song:ready fires once the whole chart has arrived, also after an
         // arrangement switch (the highway reloads the chart).
-        bus.on('song:ready', () => hookState.vtLifecycle?.ready?.());
+        bus.on('song:ready', () => {
+            hookState.vtLifecycle?.ready?.();
+            // The player's control bar is (re)built around song load.
+            setTimeout(() => hookState.vtLifecycle?.inject?.(), 500);
+        });
         bus.on('song:stop', () => hookState.vtLifecycle?.stopped?.());
         bus.on('song:ended', () => hookState.vtLifecycle?.stopped?.());
     })();
