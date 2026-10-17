@@ -411,6 +411,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         const bus = window.feedBack || window.slopsmith;
         if (bus) bus.virtualTuning = { active: !!active, mode };
     }
+    // What the last song got, so the Audio screen can still show it: leaving
+    // the player for this screen stops the song (core session.js), which
+    // ends the per-song state below.
+    let vtLastSong = null;          // { title, text }
     function vtStatus(text) {
         const el = $('ae-drop-tune-status');
         if (!el) return;
@@ -431,6 +435,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         vtClearChart();
         const mode = vtMode();
         const auto = mode === 'auto';
+        // Re-fret wanted but its provider not selected yet (e.g. a song started
+        // before start-up finished): select it now; the re-staged chart then
+        // triggers another refresh through the transform.
+        if (auto && vtRefretEnabled() && !hookState.vtRefretSelected) vtSyncRefretProvider();
         if (!auto && mode === 0) { publishVirtualTuning(false, 'manual'); vtStatus(''); return; }
         const hw = window.highway;
         const notes = hw && typeof hw.getNotes === 'function' ? hw.getNotes() : null;
@@ -441,7 +449,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             if (auto) {
                 vtSendSemis(0);
                 publishVirtualTuning(false, 'auto');
-                vtStatus('Match each song: waiting for a song.');
+                vtStatus(vtNoSongText(true));
             } else {
                 publishVirtualTuning(true, 'manual');
             }
@@ -471,7 +479,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 ? `Re-fretted for its chords: ${refretPlan.add.map((d, i) => (d ? `string ${i + 1} +${d}` : null))
                     .filter(Boolean).join(', ')} frets (as shown on the highway).`
                 : '';
-            vtStatus([magicTuningDescribe(perString), refretNote, warning].filter(Boolean).join(' '));
+            const autoText = [magicTuningDescribe(perString), refretNote, warning].filter(Boolean).join(' ');
+            vtLastSong = { title: vtSongTitle(hw), text: autoText };
+            vtStatus(autoText);
             publishVirtualTuning(perString.some((v) => v !== 0), 'auto');
             if (perString.every((v) => v === 0)) { vtSendSemis(0); return; }
             const schedule = magicTuningSchedule(notes, chords, perString, VT_SHIFT_LEAD_S);
@@ -483,7 +493,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const sc = Number(song.stringCount) || (Array.isArray(song.tuning) ? song.tuning.length : 0) || 6;
             perString = new Array(sc).fill(mode);
             publishVirtualTuning(true, 'manual');
-            vtStatus(virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString));
+            const fixedText = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString);
+            vtLastSong = fixedText ? { title: vtSongTitle(hw), text: fixedText } : null;
+            vtStatus(fixedText);
         }
         const hints = virtualTuningHints(notes, chords, song, perString);
         chart.noteTimes = hints.t;
@@ -505,12 +517,24 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         console.info('[audio-engine] virtual tuning:', auto ? 'match song' : `fixed ${mode}`, perString,
             '-', (chart.shiftTimes || []).length, 'shift points,', hints.t.length, 'primed notes');
     }
+    function vtSongTitle(hw) {
+        const info = hw && typeof hw.getSongInfo === 'function' ? (hw.getSongInfo() || {}) : {};
+        const name = [info.artist, info.title].filter(Boolean).join(' – ');
+        return name ? (info.arrangement ? `${name} (${info.arrangement})` : name) : '';
+    }
+    // Status while no song is loaded, with what the last song got.
+    function vtNoSongText(auto) {
+        const last = vtLastSong && vtLastSong.text
+            ? ` Last song${vtLastSong.title ? `, ${vtLastSong.title}` : ''}: ${vtLastSong.text}` : '';
+        if (!auto) return last ? `No song playing (leaving the player stops it).${last}` : '';
+        return `Match each song: no song playing (leaving the player stops it); it applies when a song plays.${last}`;
+    }
     function vtSongStopped() {
         vtClearChart();
-        if (vtMode() !== 'auto') return;
+        if (vtMode() !== 'auto') { vtStatus(vtNoSongText(false)); return; }
         vtSendSemis(0);
         publishVirtualTuning(false, 'auto');
-        vtStatus('Match each song: waiting for a song.');
+        vtStatus(vtNoSongText(true));
     }
     // Applies whatever the selector says (setting change, restore, engine start).
     async function applyDropTuneSetting() {
@@ -542,7 +566,17 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // Runs inside the highway's synchronous transform staging (chart ready,
     // mastery change, refresh), never per frame. Stored on hookState so a
     // re-evaluated script swaps in its fresh closure.
+    // The highway can (re)stage the transform after song:ready already ran
+    // vtRefresh (the provider got selected while the chart was loading, or a
+    // mastery change re-staged it), so re-read the chart once staging is done.
+    let vtRefreshPending = false;
+    function vtRefreshSoon() {
+        if (vtRefreshPending) return;
+        vtRefreshPending = true;
+        setTimeout(() => { vtRefreshPending = false; hookState.vtLifecycle?.ready?.(); }, 0);
+    }
     hookState.vtRefretTransform = (input) => {
+        vtRefreshSoon();
         vtRefretApplied = null;
         if (!vtRefretEnabled() || vtMode() !== 'auto' || !input) return null;
         const info = input.songInfo || {};
@@ -577,10 +611,12 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         const state = await vtChartTransform('inspect');
         const active = state && state.payload ? state.payload.active : null;
         if (want && active !== VT_REFRET_PROVIDER) {
-            await vtChartTransform('select-provider', { providerId: VT_REFRET_PROVIDER });
+            const res = await vtChartTransform('select-provider', { providerId: VT_REFRET_PROVIDER });
+            if (!res || res.outcome !== 'handled') return;
         } else if (!want && active === VT_REFRET_PROVIDER) {
             await vtChartTransform('clear-provider');
         }
+        hookState.vtRefretSelected = want;
         if (!want) vtRefretApplied = null;
         await vtChartTransform('refresh');
     }
