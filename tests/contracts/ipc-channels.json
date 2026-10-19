@@ -21,6 +21,7 @@
   "audio:getDeviceMetrics",
   "audio:getDeviceTypes",
   "audio:getDropTuneSemitones",
+  "audio:getEngineStats",
   "audio:getKnownPlugins",
   "audio:getLevels",
   "audio:getNoteVerdicts",

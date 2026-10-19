@@ -727,10 +727,15 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         const status = document.createElement('div');
         status.dataset.vt = 'status';
         status.className = 'text-xs text-emerald-400 mt-2';
-        panel.append(title, sel, label, status);
+        const stats = document.createElement('div');
+        stats.dataset.vt = 'stats';
+        stats.className = 'text-xs text-slate-400 mt-2';
+        stats.title = 'Delay virtual tuning adds, and how much of each audio block\'s time the processing uses (near 100% = crackles).';
+        panel.append(title, sel, label, status, stats);
         player.style.position = 'relative';
         player.appendChild(panel);
         vtUpdatePlayerControl();
+        renderEngineStats();
     }
     hookState.vtLifecycle = { ready: vtRefresh, stopped: vtSongStopped, inject: vtInjectPlayerControl };
     (function installVirtualTuningLifecycle() {
@@ -2267,6 +2272,77 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // ── Metering ──────────────────────────────────────────────────────────────
     let meterPollInterval = null;
 
+    // ── Engine load + virtual-tuning delay ────────────────────────────────────
+    // ES-PURE-BEGIN — pure helper, loaded by tests/engine-stats.test.js.
+    // Display text for audio.getEngineStats() (null when the addon lacks it).
+    // `recentPeak`: the worst load the caller saw over its last few polls (the
+    // engine reports the worst block since the previous poll). Load is the
+    // busier of the two device callbacks; the output one only runs in split mode.
+    function engineStatsView(st, recentPeak) {
+        const view = { cpu: '', level: 'ok', delay: '' };
+        if (!st || !st.running) return view;
+        const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+        const load = Math.max(num(st.inputLoad), num(st.outputLoad));
+        const peak = Math.max(load, num(st.inputPeak), num(st.outputPeak), num(recentPeak));
+        // One decimal below 10 %, so a light chain doesn't read as a flat 0 %.
+        const pct = (v) => (v < 0.1 ? `${(v * 100).toFixed(1)}%` : `${Math.round(v * 100)}%`);
+        view.cpu = `CPU ${pct(load)} · peak ${pct(peak)}`;
+        view.level = peak >= 0.8 ? 'high' : peak >= 0.5 ? 'warn' : 'ok';
+        const dt = st.dropTune || {};
+        if (dt.shifting) {
+            view.delay = `Virtual tuning +${num(dt.averageMs).toFixed(1)} ms`;
+            if (num(dt.plucks) > 0 && num(dt.attackMs) > 0) view.delay += ` (attack ${num(dt.attackMs).toFixed(1)} ms)`;
+        }
+        return view;
+    }
+    // ES-PURE-END
+
+    const engineCpuEl = $('ae-engine-cpu');
+    const engineDelayEl = $('ae-engine-delay');
+    const enginePanelEl = $('audio-engine-panel');
+    const ENGINE_STATS_POLL_MS = 500;
+    const ENGINE_PEAK_POLLS = 6;                  // "peak" covers the last 3 s
+    let engineView = null;
+    function engineStatsVisible() {
+        return (enginePanelEl && enginePanelEl.offsetParent !== null)
+            || !!document.getElementById('ae-vt-panel-float');
+    }
+    function renderEngineStats() {
+        const v = engineView || { cpu: '', level: 'ok', delay: '' };
+        if (engineCpuEl) {
+            engineCpuEl.textContent = v.cpu;
+            engineCpuEl.classList.toggle('hidden', !v.cpu);
+            engineCpuEl.classList.toggle('text-slate-500', v.level === 'ok');
+            engineCpuEl.classList.toggle('text-amber-400', v.level === 'warn');
+            engineCpuEl.classList.toggle('text-red-400', v.level === 'high');
+        }
+        if (engineDelayEl) {
+            engineDelayEl.textContent = v.delay;
+            engineDelayEl.classList.toggle('hidden', !v.delay);
+        }
+        const panelStats = document.querySelector('#ae-vt-panel-float [data-vt="stats"]');
+        if (panelStats) {
+            panelStats.textContent = [v.delay || (v.cpu ? 'Virtual tuning: not shifting' : ''), v.cpu]
+                .filter(Boolean).join(' · ');
+        }
+    }
+    function startEngineStats() {
+        if (typeof api.getEngineStats !== 'function') return;
+        if (hookState.engineStatsInterval) clearInterval(hookState.engineStatsInterval);
+        const peaks = [];
+        hookState.engineStatsInterval = setInterval(async () => {
+            // Only while someone can see it: the Audio screen or the player's panel.
+            if (!audioRunning || !engineStatsVisible()) return;
+            try {
+                const st = await api.getEngineStats();
+                peaks.push(Math.max(Number(st?.inputPeak) || 0, Number(st?.outputPeak) || 0));
+                if (peaks.length > ENGINE_PEAK_POLLS) peaks.shift();
+                engineView = engineStatsView(st, Math.max(0, ...peaks));
+                renderEngineStats();
+            } catch (_) { /* ignore polling errors */ }
+        }, ENGINE_STATS_POLL_MS);
+    }
+
     function startMetering() {
         // Use setInterval at ~30fps instead of rAF to avoid overwhelming IPC
         if (meterPollInterval) clearInterval(meterPollInterval);
@@ -2315,6 +2391,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 }
             } catch (e) { /* ignore polling errors */ }
         }, 33); // ~30fps
+
+        startEngineStats();
 
         // Latency: poll less frequently
         setInterval(async () => {

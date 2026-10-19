@@ -6,6 +6,10 @@
             <span id="ae-status-text" class="text-sm text-slate-400">Audio engine not available</span>
         </div>
         <div class="flex items-center gap-2">
+            <span id="ae-engine-delay" class="text-xs text-emerald-400 hidden"
+                  title="The delay virtual tuning adds on top of the device latency: the running average while it shifts, and the average over the first 20 ms after each pluck (when the song's chart is loaded)."></span>
+            <span id="ae-engine-cpu" class="text-xs text-slate-500 hidden"
+                  title="How much of each audio block's time the processing uses (amp sims, effects, virtual tuning, detection). Near 100% the device runs out of time and you hear crackles: raise the buffer size or lighten the tone. Peak = the worst block in the last 3 seconds."></span>
             <span id="ae-latency" class="text-xs text-slate-500"></span>
             <button id="ae-toggle" class="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-sm font-medium disabled:opacity-50" disabled>
                 Start

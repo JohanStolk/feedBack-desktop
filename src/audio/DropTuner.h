@@ -81,6 +81,22 @@ public:
     // Returns true if any sample was changed (shifted or crossfading).
     bool process(float* samples, int numSamples) noexcept;
 
+    // The delay the shift adds, for the UI; any thread, in ms. Published once
+    // per processed block from the read head(s):
+    //  - nowMs: this block's mean (0 in dry passthrough);
+    //  - averageMs: ~1 s average while shifting (kept when it stops);
+    //  - attackMs: mean over the first kAttackMs after the latest pluck that
+    //    matched a chart note (chart priming only; 0 = none measured yet);
+    //  - plucks: how many such attacks were measured.
+    struct DelayStats
+    {
+        bool shifting = false;
+        float nowMs = 0.0f, averageMs = 0.0f, attackMs = 0.0f;
+        uint32_t plucks = 0;
+    };
+    DelayStats getDelayStats() const noexcept;
+    static constexpr double kAttackMs = 20.0;
+
     // Diagnostics / tests (audio-thread values; read after process()).
     double getDelaySamples() const noexcept { return delay; }
     double getTrackedPeriod() const noexcept { return period; }
@@ -155,6 +171,15 @@ private:
     std::vector<float> decimTaps;                  // lowpass FIR, applied every `decim` samples
     std::vector<float> aring;                      // analysis-rate history
     uint64_t amask = 0, aWritten = 0;
+
+    // Delay stats (see getDelayStats): audio-thread accumulators + published values.
+    double avgDelay = 0.0;                         // samples, EMA while shifting
+    bool avgSeeded = false;
+    double attackSum = 0.0;
+    int attackN = 0, attackLen = 1;
+    std::atomic<bool> statShifting { false };
+    std::atomic<float> statNowMs { 0.0f }, statAvgMs { 0.0f }, statAttackMs { 0.0f };
+    std::atomic<uint32_t> statPlucks { 0 };
 
     // YIN workspace (sized in prepare), in analysis samples
     int tauMin = 2, tauMax = 2, frameLen = 4, fftSize = 8;

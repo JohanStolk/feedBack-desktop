@@ -17,6 +17,7 @@
   "getDeviceMetrics",
   "getDeviceTypes",
   "getDropTuneSemitones",
+  "getEngineStats",
   "getKnownPlugins",
   "getLatencyBreakdown",
   "getLevels",

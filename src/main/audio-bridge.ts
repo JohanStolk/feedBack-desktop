@@ -667,6 +667,13 @@ export function initAudioBridge(): void {
         return typeof audio?.getDropTuneSemitones === 'function' ? audio.getDropTuneSemitones() : 0;
     });
 
+    // Live callback load + virtual-tuning delay (src/audio/AudioEngine.h,
+    // EngineStats). Polled by the Audio screen and the player's Tuning panel;
+    // each call takes the peaks since the previous one. null without the addon.
+    ipcMain.handle('audio:getEngineStats', () => {
+        return typeof audio?.getEngineStats === 'function' ? audio.getEngineStats() : null;
+    });
+
     // Per-song virtual-tuning chart: shift change points and each note's
     // expected input pitch (see src/audio/DropTuner.h). Anything that isn't a
     // plain object clears it; the addon validates the arrays.

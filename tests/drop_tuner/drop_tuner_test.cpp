@@ -426,6 +426,82 @@ static void test_chart_input_is_sanitised()
     for (float v : x) CHECK(std::isfinite(v) && v == 0.0f, "silence stays silent");
 }
 
+static void test_delay_stats_follow_the_shift()
+{
+    // The UI figures: nothing while dry, the head's actual lag while shifting
+    // (compared with an independent per-block average of getDelaySamples),
+    // and back to "not shifting" once faded out, keeping the last average.
+    const double sr = 48000.0;
+    DropTuner dt;
+    dt.prepare(sr);
+    auto x = bassNote(41.2, 1.5, sr);
+    run(dt, std::vector<float>(x.begin(), x.begin() + 4800), 256);
+    auto st = dt.getDelayStats();
+    CHECK(! st.shifting && st.nowMs == 0.0f && st.averageMs == 0.0f, "dry: shifting=%d now=%.2f avg=%.2f",
+          (int) st.shifting, st.nowMs, st.averageMs);
+
+    // Reference: the same input one sample at a time, averaging the head lag
+    // over the second half (a block's mean can't be read from outside).
+    DropTuner ref;
+    ref.prepare(sr);
+    run(ref, std::vector<float>(x.begin(), x.begin() + 4800), 256);
+    dt.setSemitones(-6.0f);
+    ref.setSemitones(-6.0f);
+    const size_t from = (size_t) (0.75 * sr);
+    double refSum = 0.0, nowSum = 0.0;
+    size_t refN = 0, nowN = 0;
+    for (size_t i = 4800; i < x.size(); i += 256)
+    {
+        const int len = (int) std::min((size_t) 256, x.size() - i);
+        std::vector<float> one(x.begin() + (long) i, x.begin() + (long) i + len);
+        for (int k = 0; k < len; ++k)
+        {
+            ref.process(&one[(size_t) k], 1);
+            if (i >= from) { refSum += ref.getDelaySamples(); ++refN; }
+        }
+        dt.process(x.data() + i, len);
+        if (i >= from) { nowSum += dt.getDelayStats().nowMs; ++nowN; }
+    }
+    st = dt.getDelayStats();
+    const double refMs = refSum / refN / sr * 1000.0, nowMs = nowSum / nowN;
+    CHECK(st.shifting, "shifting at -6");
+    // getDelaySamples() is the outgoing head during a splice crossfade; the
+    // stats blend both heads (what is heard), so they read slightly lower.
+    CHECK(std::abs(nowMs - refMs) < 1.0, "per-block delay %.2f ms vs head lag %.2f ms", nowMs, refMs);
+    CHECK(st.averageMs > 4.0f && st.averageMs < 40.0f, "average delay at -6: %.1f ms", st.averageMs);
+    CHECK(std::abs(st.averageMs - refMs) < 5.0, "running average %.1f ms vs %.1f ms", st.averageMs, refMs);
+    CHECK(st.plucks == 0 && st.attackMs == 0.0f, "no chart, no attack figure: %u / %.1f", st.plucks, st.attackMs);
+
+    const float kept = st.averageMs;
+    dt.setSemitones(0.0f);
+    std::vector<float> rest((size_t) (0.2 * sr), 0.0f);
+    run(dt, rest, 256);
+    st = dt.getDelayStats();
+    CHECK(! st.shifting && st.nowMs == 0.0f, "off again: shifting=%d now=%.2f", (int) st.shifting, st.nowMs);
+    CHECK(st.averageMs > 0.0f && std::abs(st.averageMs - kept) < 1.0f, "last average kept: %.2f vs %.2f",
+          st.averageMs, kept);
+}
+
+static void test_attack_delay_is_measured()
+{
+    // With the chart, each matched pluck yields one attack figure: the mean lag
+    // over the first 20 ms, which the head restart keeps near the minimum.
+    const double sr = 48000.0, noteSec = 0.5;
+    auto x = noteRun({ 41.2, 41.2, 41.2, 41.2 }, noteSec, sr);
+    DropTuner dt;
+    dt.prepare(sr);
+    dt.setSemitones(-6.0f);
+    dt.setChart({}, {}, { 0.0, 0.5, 1.0, 1.5 }, { 41.2f, 41.2f, 41.2f, 41.2f });
+    runClocked(dt, x, 0, x.size(), sr);
+    const auto st = dt.getDelayStats();
+    const double minMs = 4.0 + 2.0 / 48.0;
+    CHECK(st.plucks >= 3, "attacks measured: %u (onsets %u)", st.plucks, dt.getOnsetCount());
+    CHECK(st.attackMs > minMs - 0.5 && st.attackMs < minMs + 10.0, "attack delay %.1f ms (min %.1f)",
+          st.attackMs, minMs);
+    CHECK(st.attackMs < st.averageMs + 1.0, "attack %.1f ms not above the running average %.1f ms",
+          st.attackMs, st.averageMs);
+}
+
 int main()
 {
     test_bypass_is_identity();
@@ -448,6 +524,8 @@ int main()
     test_pluck_restarts_the_head();
     test_wrong_chart_falls_back_to_the_player();
     test_chart_input_is_sanitised();
+    test_delay_stats_follow_the_shift();
+    test_attack_delay_is_measured();
     if (failures == 0) std::printf("drop_tuner_test: all checks passed\n");
     return failures == 0 ? 0 : 1;
 }
