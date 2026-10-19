@@ -13,11 +13,11 @@ function loadHelper() {
     const end = src.indexOf('// ES-PURE-END');
     assert.ok(begin > 0 && end > begin, 'ES-PURE markers present');
     const ctx = {};
-    vm.runInNewContext(src.slice(begin, end) + '\nthis.engineStatsView = engineStatsView; this.engineHudText = engineHudText;', ctx);
+    vm.runInNewContext(src.slice(begin, end) + '\nthis.engineStatsView = engineStatsView; this.engineHudText = engineHudText; this.vtInputLeakWarning = vtInputLeakWarning;', ctx);
     return ctx;
 }
 
-const { engineStatsView: view, engineHudText: hudText } = loadHelper();
+const { engineStatsView: view, engineHudText: hudText, vtInputLeakWarning: leak } = loadHelper();
 const base = {
     running: true, duplex: true, inputLoad: 0.23, inputPeak: 0.31, outputLoad: 0, outputPeak: 0,
     dropTune: { shifting: false, nowMs: 0, averageMs: 0, attackMs: 0, plucks: 0 },
@@ -76,4 +76,17 @@ test('HUD line: virtual tuning with its delay, then the load', () => {
     assert.equal(hudText(view(base, 0), ''), 'CPU 23% · peak 31%', 'off: only the load');
     assert.equal(hudText(view(null, 0), '−2 fixed'), 'Virtual tuning −2 fixed', 'engine stopped: setting only');
     assert.equal(hudText(view(null, 0), ''), '');
+});
+
+test('unshifted-input warning: NAM browser amp is certain, other streams are a hint', () => {
+    assert.deepEqual({ ...leak(false, true, 3) }, { level: '', text: '' }, 'virtual tuning off: nothing to warn');
+    assert.deepEqual({ ...leak(true, false, 0) }, { level: '', text: '' });
+    const nam = leak(true, true, 1);
+    assert.equal(nam.level, 'high');
+    assert.match(nam.text, /NAM Tone plays your input unshifted/);
+    const other = leak(true, false, 2);
+    assert.equal(other.level, 'warn');
+    assert.match(other.text, /^⚠ 2 raw input streams open/);
+    assert.match(leak(true, false, 1).text, /^⚠ 1 raw input stream open/);
+    assert.equal(hudText(view(base, 0), '−1', nam), `Virtual tuning −1 · CPU 23% · peak 31% · ${nam.text}`);
 });

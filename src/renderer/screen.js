@@ -2327,13 +2327,77 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     }
     // The player HUD line under the song's tuning: the virtual-tuning setting
     // for this song (`vtLabel`, '' when off) with its delay, and the load.
-    function engineHudText(view, vtLabel) {
+    function engineHudText(view, vtLabel, leak) {
         const parts = [];
         if (vtLabel) parts.push(`Virtual tuning ${vtLabel}${view && view.delayShort ? ` · ${view.delayShort}` : ''}`);
         if (view && view.cpu) parts.push(view.cpu);
+        if (leak && leak.text) parts.push(leak.text);
         return parts.join(' · ');
     }
+    // A warning when something besides the engine may be playing the raw,
+    // unshifted input while virtual tuning is on: then every note sounds twice
+    // (original + shifted). `nam`: NAM Tone runs its browser (WASM) amp on a
+    // live input stream, so it certainly plays it; `streams`: live raw input
+    // streams opened in the page by anything (a plugin may only analyse them).
+    function vtInputLeakWarning(vtOn, nam, streams) {
+        if (!vtOn) return { level: '', text: '' };
+        if (nam) {
+            return { level: 'high', text: '⚠ NAM Tone plays your input unshifted (browser mode): '
+                + 'you hear every note twice. Settings → NAM Tone → Engine: Desktop Native, or turn NAM Tone off.' };
+        }
+        if (streams > 0) {
+            return { level: 'warn', text: `⚠ ${streams} raw input stream${streams === 1 ? '' : 's'} open in the app `
+                + '(a plugin listening to your instrument directly). If you hear notes twice, that plugin is playing it.' };
+        }
+        return { level: '', text: '' };
+    }
     // ES-PURE-END
+
+    // Live raw input streams opened in the page (getUserMedia with audio), to
+    // spot a plugin that plays the unshifted input. Wrapped once per page.
+    const vtStreams = hookState.vtStreams || (hookState.vtStreams = new Set());
+    (function trackInputStreams() {
+        const md = navigator.mediaDevices;
+        if (hookState.vtStreamsPatched || !md || typeof md.getUserMedia !== 'function') return;
+        hookState.vtStreamsPatched = true;
+        const original = md.getUserMedia.bind(md);
+        md.getUserMedia = async function (constraints, ...rest) {
+            const stream = await original(constraints, ...rest);
+            try { if (stream && stream.getAudioTracks().length) vtStreams.add(stream); } catch (_) { /* ignore */ }
+            return stream;
+        };
+    })();
+    function vtLiveInputStreams() {
+        let n = 0;
+        for (const st of vtStreams) {
+            const live = st.active && st.getAudioTracks().some((t) => t.readyState === 'live' && t.enabled);
+            if (live) n++; else vtStreams.delete(st);
+        }
+        return n;
+    }
+    // NAM Tone's browser amp. Its state is top-level `let`s in its classic
+    // script (global lexical scope, not window properties), so read them by
+    // name, guarded: absent plugin or a renamed variable → false.
+    function vtNamBrowserAmpActive() {
+        try {
+            // eslint-disable-next-line no-undef
+            return typeof _namNativeMode !== 'undefined' && !_namNativeMode
+                // eslint-disable-next-line no-undef
+                && typeof _namStream !== 'undefined' && !!_namStream && _namStream.active === true;
+        } catch (_) { return false; }
+    }
+    let vtLeakLogged = '';
+    function vtCurrentLeak() {
+        const mode = typeof vtMode === 'function' ? vtMode() : 0;
+        const leak = vtInputLeakWarning(mode !== 0, vtNamBrowserAmpActive(), vtLiveInputStreams());
+        // Once per change into the terminal log too (the renderer console is
+        // forwarded there), so a report can be matched to it afterwards.
+        if (leak.text !== vtLeakLogged) {
+            vtLeakLogged = leak.text;
+            if (leak.text) console.warn('[audio-engine] virtual tuning:', leak.text);
+        }
+        return leak;
+    }
 
     const engineCpuEl = $('ae-engine-cpu');
     const engineDelayEl = $('ae-engine-delay');
@@ -2364,16 +2428,19 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         if (hud) {
             const mode = typeof vtMode === 'function' ? vtMode() : 0;
             const label = mode === 0 ? '' : (vtShortLabel || (mode === 'auto' ? 'match song' : `${vtFmtSemis(mode)} fixed`));
-            hud.textContent = engineHudText(v, label);
+            const leak = vtCurrentLeak();
+            hud.textContent = engineHudText(v, label, leak);
             hud.classList.toggle('hidden', !hud.textContent);
-            hud.classList.toggle('text-gray-500', v.level === 'ok');
-            hud.classList.toggle('text-amber-400', v.level === 'warn');
-            hud.classList.toggle('text-red-400', v.level === 'high');
+            const level = leak.level === 'high' || v.level === 'high' ? 'high'
+                : leak.level === 'warn' || v.level === 'warn' ? 'warn' : 'ok';
+            hud.classList.toggle('text-gray-500', level === 'ok');
+            hud.classList.toggle('text-amber-400', level === 'warn');
+            hud.classList.toggle('text-red-400', level === 'high');
         }
         const panelStats = document.querySelector('#ae-vt-panel-float [data-vt="stats"]');
         if (panelStats) {
-            panelStats.textContent = [v.delay || (v.cpu ? 'Virtual tuning: not shifting' : ''), v.cpu]
-                .filter(Boolean).join(' · ');
+            panelStats.textContent = [v.delay || (v.cpu ? 'Virtual tuning: not shifting' : ''), v.cpu,
+                vtCurrentLeak().text].filter(Boolean).join(' · ');
         }
     }
     // Callable from the virtual-tuning code above, which can run before this
