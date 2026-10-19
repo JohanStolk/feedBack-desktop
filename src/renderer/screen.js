@@ -647,7 +647,26 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         if (vtShortLabel) return `Tuning ${vtShortLabel}`;
         return mode === 'auto' ? 'Tuning: match song' : `Tuning ${vtFmtSemis(mode)} fixed`;
     }
+    // A line in the player's top-left song info, right under "Tuning: …":
+    // the virtual-tuning setting, its delay and the engine load, always in
+    // view while playing. Click: the Tuning panel. Filled by renderEngineStats.
+    function vtEnsureHudLine() {
+        const anchor = document.getElementById('hud-tuning-targets') || document.getElementById('hud-tuning');
+        if (!anchor || !anchor.parentElement) return;
+        let line = document.getElementById('ae-hud-vt');
+        if (!line) {
+            line = document.createElement('div');
+            line.id = 'ae-hud-vt';
+            line.className = 'text-xs mt-0.5 cursor-pointer text-gray-500 hidden';
+            line.title = 'Virtual tuning (with the delay it adds) and how much of each audio block\'s time '
+                + 'the processing uses (near 100% = crackles). Click for the Tuning panel.';
+            line.onclick = () => vtTogglePanel();
+        }
+        if (anchor.nextElementSibling !== line) anchor.after(line);
+        hookState.engineStatsRender?.();
+    }
     function vtInjectPlayerControl() {
+        vtEnsureHudLine();
         // v3: the stable Plugin controls slot (rail popover), first in line so
         // it stays reachable however many plugins add controls. Older shells:
         // the control bar, before Close.
@@ -685,6 +704,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const cb = panel.querySelector('[data-vt="refret"]');
             if (cb && dropTuneRefretCheckbox) cb.checked = dropTuneRefretCheckbox.checked;
         }
+        hookState.engineStatsRender?.();      // the HUD line's setting label
     }
     function vtClosePanel() {
         const panel = document.getElementById('ae-vt-panel-float');
@@ -744,7 +764,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         player.style.position = 'relative';
         player.appendChild(panel);
         vtUpdatePlayerControl();
-        renderEngineStats();
+        hookState.engineStatsRender?.();
     }
     hookState.vtLifecycle = { ready: vtRefresh, stopped: vtSongStopped, inject: vtInjectPlayerControl };
     (function installVirtualTuningLifecycle() {
@@ -2288,7 +2308,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // engine reports the worst block since the previous poll). Load is the
     // busier of the two device callbacks; the output one only runs in split mode.
     function engineStatsView(st, recentPeak) {
-        const view = { cpu: '', level: 'ok', delay: '' };
+        const view = { cpu: '', level: 'ok', delay: '', delayShort: '' };
         if (!st || !st.running) return view;
         const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
         const load = Math.max(num(st.inputLoad), num(st.outputLoad));
@@ -2299,10 +2319,19 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         view.level = peak >= 0.8 ? 'high' : peak >= 0.5 ? 'warn' : 'ok';
         const dt = st.dropTune || {};
         if (dt.shifting) {
-            view.delay = `Virtual tuning +${num(dt.averageMs).toFixed(1)} ms`;
+            view.delayShort = `+${num(dt.averageMs).toFixed(1)} ms`;
+            view.delay = `Virtual tuning ${view.delayShort}`;
             if (num(dt.plucks) > 0 && num(dt.attackMs) > 0) view.delay += ` (attack ${num(dt.attackMs).toFixed(1)} ms)`;
         }
         return view;
+    }
+    // The player HUD line under the song's tuning: the virtual-tuning setting
+    // for this song (`vtLabel`, '' when off) with its delay, and the load.
+    function engineHudText(view, vtLabel) {
+        const parts = [];
+        if (vtLabel) parts.push(`Virtual tuning ${vtLabel}${view && view.delayShort ? ` · ${view.delayShort}` : ''}`);
+        if (view && view.cpu) parts.push(view.cpu);
+        return parts.join(' · ');
     }
     // ES-PURE-END
 
@@ -2313,8 +2342,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     const ENGINE_PEAK_POLLS = 6;                  // "peak" covers the last 3 s
     let engineView = null;
     function engineStatsVisible() {
+        const hud = document.getElementById('ae-hud-vt');
         return (enginePanelEl && enginePanelEl.offsetParent !== null)
-            || !!document.getElementById('ae-vt-panel-float');
+            || !!document.getElementById('ae-vt-panel-float')
+            || !!(hud && hud.offsetParent !== null);
     }
     function renderEngineStats() {
         const v = engineView || { cpu: '', level: 'ok', delay: '' };
@@ -2329,19 +2360,37 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             engineDelayEl.textContent = v.delay;
             engineDelayEl.classList.toggle('hidden', !v.delay);
         }
+        const hud = document.getElementById('ae-hud-vt');
+        if (hud) {
+            const mode = typeof vtMode === 'function' ? vtMode() : 0;
+            const label = mode === 0 ? '' : (vtShortLabel || (mode === 'auto' ? 'match song' : `${vtFmtSemis(mode)} fixed`));
+            hud.textContent = engineHudText(v, label);
+            hud.classList.toggle('hidden', !hud.textContent);
+            hud.classList.toggle('text-gray-500', v.level === 'ok');
+            hud.classList.toggle('text-amber-400', v.level === 'warn');
+            hud.classList.toggle('text-red-400', v.level === 'high');
+        }
         const panelStats = document.querySelector('#ae-vt-panel-float [data-vt="stats"]');
         if (panelStats) {
             panelStats.textContent = [v.delay || (v.cpu ? 'Virtual tuning: not shifting' : ''), v.cpu]
                 .filter(Boolean).join(' · ');
         }
     }
+    // Callable from the virtual-tuning code above, which can run before this
+    // part of the script has (song events): only once it's defined.
+    hookState.engineStatsRender = renderEngineStats;
     function startEngineStats() {
         if (typeof api.getEngineStats !== 'function') return;
         if (hookState.engineStatsInterval) clearInterval(hookState.engineStatsInterval);
         const peaks = [];
         hookState.engineStatsInterval = setInterval(async () => {
-            // Only while someone can see it: the Audio screen or the player's panel.
-            if (!audioRunning || !engineStatsVisible()) return;
+            // Only while someone can see it: the Audio screen, the player's HUD line or panel.
+            if (!engineStatsVisible()) return;
+            if (!audioRunning) {
+                engineView = null;              // the HUD line keeps just the setting
+                renderEngineStats();
+                return;
+            }
             try {
                 const st = await api.getEngineStats();
                 peaks.push(Math.max(Number(st?.inputPeak) || 0, Number(st?.outputPeak) || 0));

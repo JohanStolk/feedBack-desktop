@@ -13,11 +13,11 @@ function loadHelper() {
     const end = src.indexOf('// ES-PURE-END');
     assert.ok(begin > 0 && end > begin, 'ES-PURE markers present');
     const ctx = {};
-    vm.runInNewContext(src.slice(begin, end) + '\nthis.engineStatsView = engineStatsView;', ctx);
-    return ctx.engineStatsView;
+    vm.runInNewContext(src.slice(begin, end) + '\nthis.engineStatsView = engineStatsView; this.engineHudText = engineHudText;', ctx);
+    return ctx;
 }
 
-const view = loadHelper();
+const { engineStatsView: view, engineHudText: hudText } = loadHelper();
 const base = {
     running: true, duplex: true, inputLoad: 0.23, inputPeak: 0.31, outputLoad: 0, outputPeak: 0,
     dropTune: { shifting: false, nowMs: 0, averageMs: 0, attackMs: 0, plucks: 0 },
@@ -67,4 +67,13 @@ test('garbage values read as zero', () => {
     const v = view({ running: true, inputLoad: 'x', inputPeak: NaN, dropTune: { shifting: true, averageMs: null } }, undefined);
     assert.equal(v.cpu, 'CPU 0.0% · peak 0.0%');
     assert.equal(v.delay, 'Virtual tuning +0.0 ms');
+});
+
+test('HUD line: virtual tuning with its delay, then the load', () => {
+    const shifting = view({ ...base, dropTune: { shifting: true, averageMs: 7.06, attackMs: 0, plucks: 0 } }, 0);
+    assert.equal(hudText(shifting, '−2 · re-fret'), 'Virtual tuning −2 · re-fret · +7.1 ms · CPU 23% · peak 31%');
+    assert.equal(hudText(view(base, 0), 'standard'), 'Virtual tuning standard · CPU 23% · peak 31%');
+    assert.equal(hudText(view(base, 0), ''), 'CPU 23% · peak 31%', 'off: only the load');
+    assert.equal(hudText(view(null, 0), '−2 fixed'), 'Virtual tuning −2 fixed', 'engine stopped: setting only');
+    assert.equal(hudText(view(null, 0), ''), '');
 });
