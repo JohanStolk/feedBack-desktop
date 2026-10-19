@@ -648,9 +648,14 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         return mode === 'auto' ? 'Tuning: match song' : `Tuning ${vtFmtSemis(mode)} fixed`;
     }
     function vtInjectPlayerControl() {
-        const controls = document.getElementById('player-controls');
+        // v3: the stable Plugin controls slot (rail popover), first in line so
+        // it stays reachable however many plugins add controls. Older shells:
+        // the control bar, before Close.
+        const slot = window.feedBack?.ui?.playerControlSlot?.() || null;
+        const controls = slot || document.getElementById('player-controls');
         if (!controls || !dropTuneSelect) return;
         let btn = document.getElementById('btn-vt-tuning');
+        if (btn && slot && btn.parentElement !== slot) slot.prepend(btn);
         if (!btn) {
             btn = document.createElement('button');
             btn.id = 'btn-vt-tuning';
@@ -659,8 +664,12 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             btn.style.cssText = 'background:rgba(6,78,59,0.45);color:#6ee7b7;';
             btn.title = 'Virtual tuning for this song';
             btn.onclick = () => vtTogglePanel();
-            const closeBtn = controls.querySelector('button[onclick*="showScreen"]');
-            if (closeBtn) controls.insertBefore(btn, closeBtn); else controls.appendChild(btn);
+            if (slot) {
+                slot.prepend(btn);
+            } else {
+                const closeBtn = controls.querySelector('button[onclick*="showScreen"]');
+                if (closeBtn) controls.insertBefore(btn, closeBtn); else controls.appendChild(btn);
+            }
         }
         vtUpdatePlayerControl();
     }
