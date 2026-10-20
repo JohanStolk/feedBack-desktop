@@ -40,7 +40,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -57,15 +57,15 @@ jobs:
           echo "dotnet=$DOTNET_VERSION" >> $GITHUB_OUTPUT
           echo "Node ${NODE_VERSION}, Python ${PYTHON_VERSION}, .NET ${DOTNET_VERSION}"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ steps.config.outputs.node }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ steps.config.outputs.python }}
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ steps.config.outputs.dotnet }}.x
 
@@ -461,7 +461,7 @@ jobs:
           security delete-keychain build.keychain 2>/dev/null || true
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: slopsmith-${{ matrix.platform }}-${{ matrix.arch }}
           # release/win-unpacked/ is intentionally NOT uploaded: it is the
@@ -500,7 +500,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
 
@@ -545,7 +545,7 @@ jobs:
           # so they would match nothing or duplicate the Velopack *-osx.zip.
           #
           # The velopack glob is `artifacts/**/velopack/**/*`, NOT
-          # `artifacts/**/release/velopack/**/*`. actions/upload-artifact@v4
+          # `artifacts/**/release/velopack/**/*`. actions/upload-artifact@v6
           # strips the longest common path prefix from upload inputs before
           # archiving, so when the build job uploads both
           # `release/win-unpacked/**` and `release/velopack/**`, the common
