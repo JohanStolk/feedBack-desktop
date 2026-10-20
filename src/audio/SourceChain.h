@@ -199,7 +199,7 @@ public:
     }
     void clearDropTuneChart() { dropTuner.clearChart(); }
     slopsmith::DropTuner::DelayStats getDropTuneDelayStats() const { return dropTuner.getDelayStats(); }
-    void setDropTuneClock(double songTime, bool playing) { dropTuner.setClock(songTime, playing); }
+    void setDropTuneClock(double songTime, bool playing, double rate = 1.0) { dropTuner.setClock(songTime, playing, rate); }
 
     float getInputLevel() const { return currentInputLevel.load(); }
     float getInputPeak() const { return inputPeak.load(); }

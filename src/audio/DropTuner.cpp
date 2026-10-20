@@ -189,9 +189,10 @@ void DropTuner::clearChart()
     setChart({}, {}, {}, {});
 }
 
-void DropTuner::setClock(double songTime, bool playing) noexcept
+void DropTuner::setClock(double songTime, bool playing, double rate) noexcept
 {
     if (!std::isfinite(songTime)) return;
+    clockRate.store(std::isfinite(rate) ? std::clamp(rate, 0.05, 4.0) : 1.0, std::memory_order_relaxed);
     clockTime.store(songTime, std::memory_order_relaxed);
     clockPlaying.store(playing, std::memory_order_relaxed);
     clockGen.fetch_add(1, std::memory_order_release);
@@ -411,6 +412,7 @@ bool DropTuner::process(float* samples, int numSamples) noexcept
         seenClockGen = gen;
         baseTime = clockTime.load(std::memory_order_relaxed);
         basePlaying = clockPlaying.load(std::memory_order_relaxed);
+        baseRate = clockRate.load(std::memory_order_relaxed);
         baseWritten = written;
         haveClock = true;
     }
@@ -450,7 +452,7 @@ bool DropTuner::process(float* samples, int numSamples) noexcept
         if (followShifts || primed)
         {
             const double now = ! haveClock ? -1e300
-                : basePlaying ? baseTime + (double) (written - baseWritten) / sr : baseTime;
+                : basePlaying ? baseTime + (double) (written - baseWritten) / sr * baseRate : baseTime;
             if (now < lastSongTime - kSeekBackSec || now > lastSongTime + kSeekForwardSec)
                 syncChartTo(now);
             lastSongTime = now;

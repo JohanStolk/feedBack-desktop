@@ -690,10 +690,13 @@ export function initAudioBridge(): void {
     });
 
     // Song clock for the chart, pushed about once per frame while a chart is set.
-    ipcMain.handle('audio:setDropTuneClock', (_event, songTime: unknown, playing: unknown) => {
+    // `rate`: the practice speed (song seconds per second), so the engine's
+    // extrapolation between pushes matches slowed playback; default 1.
+    ipcMain.handle('audio:setDropTuneClock', (_event, songTime: unknown, playing: unknown, rate: unknown) => {
         if (!audio || typeof audio.setDropTuneClock !== 'function') return;
         if (typeof songTime !== 'number' || !Number.isFinite(songTime)) return;
-        audio.setDropTuneClock(songTime, playing !== false);
+        const r = typeof rate === 'number' && Number.isFinite(rate) && rate > 0 ? rate : 1;
+        audio.setDropTuneClock(songTime, playing !== false, r);
     });
 
     ipcMain.handle(

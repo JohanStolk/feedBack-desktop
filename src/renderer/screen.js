@@ -593,14 +593,20 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         Promise.resolve(api.setDropTuneChart(chart))
             .catch((e) => console.warn('[audio-engine] virtual tuning: setDropTuneChart failed:', e));
         vtChartSet = true;
-        // Song clock for the engine, every frame. A plain getter read plus one
-        // IPC message; no DOM work.
+        // Song clock for the engine, every frame, with the practice speed so
+        // its extrapolation between frames matches slowed playback. Plain
+        // property reads plus one IPC message; no DOM work.
         const bus = window.feedBack || window.slopsmith;
+        const audioEl = document.getElementById('audio');   // once per song, not per frame
+        const speed = () => {
+            const v = window._juceMode ? (window.jucePlayer && window.jucePlayer._speed) : (audioEl && audioEl.playbackRate);
+            return Number.isFinite(v) && v > 0 ? v : 1;
+        };
         const tick = () => {
             hookState.vtRaf = requestAnimationFrame(tick);
             const t = Number(hw.getTime?.());
             if (!Number.isFinite(t)) return;
-            Promise.resolve(api.setDropTuneClock?.(t, !!(bus && bus.isPlaying))).catch(() => {});
+            Promise.resolve(api.setDropTuneClock?.(t, !!(bus && bus.isPlaying), speed())).catch(() => {});
         };
         tick();
         console.info('[audio-engine] virtual tuning:', auto ? 'match song' : `fixed ${mode}`, perString,

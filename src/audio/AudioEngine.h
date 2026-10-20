@@ -205,9 +205,9 @@ public:
     {
         pool.forEach([](SourceChain& s) { s.clearDropTuneChart(); });
     }
-    void setDropTuneClock(double songTime, bool playing)
+    void setDropTuneClock(double songTime, bool playing, double rate = 1.0)
     {
-        pool.forEach([songTime, playing](SourceChain& s) { s.setDropTuneClock(songTime, playing); });
+        pool.forEach([songTime, playing, rate](SourceChain& s) { s.setDropTuneClock(songTime, playing, rate); });
     }
 
     // Number of audio blocks whose signal-chain output had to be scrubbed for

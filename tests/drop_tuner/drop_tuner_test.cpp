@@ -502,6 +502,33 @@ static void test_attack_delay_is_measured()
           st.attackMs, st.averageMs);
 }
 
+static void test_clock_follows_the_practice_speed()
+{
+    // At half speed the song advances 0.5 s per second of audio: a shift
+    // point at song time 1.0 lands after 2 s, not after 1 s.
+    const double sr = 48000.0;
+    DropTuner dt;
+    dt.prepare(sr);
+    dt.setChart({ -1e9, 1.0 }, { 0.0f, -3.0f }, {}, {});
+    std::vector<float> x((size_t) (2.6 * sr), 0.0f);
+    dt.setClock(0.0, true, 0.5);                    // pushed once: the engine extrapolates
+    for (size_t i = 0; i < (size_t) (1.5 * sr); i += 256)
+        dt.process(x.data() + i, (int) std::min((size_t) 256, x.size() - i));
+    CHECK(dt.getActiveSemitones() == 0.0f, "1.5 s at half speed = song 0.75: still %g", dt.getActiveSemitones());
+    for (size_t i = (size_t) (1.5 * sr); i < x.size(); i += 256)
+        dt.process(x.data() + i, (int) std::min((size_t) 256, x.size() - i));
+    CHECK(dt.getActiveSemitones() == -3.0f, "2.6 s at half speed = song 1.3: %g", dt.getActiveSemitones());
+
+    DropTuner normal;
+    normal.prepare(sr);
+    normal.setChart({ -1e9, 1.0 }, { 0.0f, -3.0f }, {}, {});
+    normal.setClock(0.0, true, std::nan(""));       // garbage rate → 1x
+    std::vector<float> y((size_t) (1.2 * sr), 0.0f);
+    for (size_t i = 0; i < y.size(); i += 256)
+        normal.process(y.data() + i, (int) std::min((size_t) 256, y.size() - i));
+    CHECK(normal.getActiveSemitones() == -3.0f, "1x: song 1.2 → -3, got %g", normal.getActiveSemitones());
+}
+
 int main()
 {
     test_bypass_is_identity();
@@ -526,6 +553,7 @@ int main()
     test_chart_input_is_sanitised();
     test_delay_stats_follow_the_shift();
     test_attack_delay_is_measured();
+    test_clock_follows_the_practice_speed();
     if (failures == 0) std::printf("drop_tuner_test: all checks passed\n");
     return failures == 0 ? 0 : 1;
 }

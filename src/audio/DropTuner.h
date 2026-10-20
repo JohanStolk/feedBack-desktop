@@ -74,8 +74,9 @@ public:
                   const std::vector<double>& noteTimes, const std::vector<float>& noteHz);
     void clearChart();
     // The song position now, pushed by the renderer (~every frame); the audio
-    // thread extrapolates from it while `playing`.
-    void setClock(double songTime, bool playing) noexcept;
+    // thread extrapolates from it while `playing`, at `rate` song seconds per
+    // second (the practice speed; non-finite → 1, clamped to [0.05, 4]).
+    void setClock(double songTime, bool playing, double rate = 1.0) noexcept;
 
     // In-place processing of one mono block. Bypass leaves samples untouched.
     // Returns true if any sample was changed (shifted or crossfading).
@@ -149,10 +150,11 @@ private:
 
     std::atomic<double> clockTime { 0.0 };
     std::atomic<bool> clockPlaying { false };
+    std::atomic<double> clockRate { 1.0 };
     std::atomic<uint32_t> clockGen { 0 };
     uint32_t seenClockGen = 0;
     bool haveClock = false, basePlaying = false;
-    double baseTime = 0.0;
+    double baseTime = 0.0, baseRate = 1.0;
     uint64_t baseWritten = 0;
 
     double hint = 0.0;                             // expected period (samples), 0 = none
