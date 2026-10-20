@@ -28,7 +28,9 @@ type AudioDeviceSettings = {
     dropTuneSemitones?: number;
     // Magical tuning: the shift follows each song's tuning (renderer-driven).
     dropTuneAuto?: boolean;
-    // Re-fret drop tunings (chart transform) with Match each song; default on.
+    // Re-fret the chart (chart transform): 'auto' (default), 'always', 'off'.
+    dropTuneRefretMode?: 'auto' | 'always' | 'off';
+    // Older on/off form (on = auto); still written for older builds.
     dropTuneRefret?: boolean;
     // Play the song (page audio) on the engine's output device; default on.
     songFollowsOutput?: boolean;
@@ -105,6 +107,10 @@ function normalizeDeviceSettings(settings: unknown): AudioDeviceSettings | null 
     }
     if (typeof record.dropTuneRefret === 'boolean') {
         normalized.dropTuneRefret = record.dropTuneRefret;
+    }
+    if (record.dropTuneRefretMode === 'auto' || record.dropTuneRefretMode === 'always'
+        || record.dropTuneRefretMode === 'off') {
+        normalized.dropTuneRefretMode = record.dropTuneRefretMode;
     }
     if (typeof record.songFollowsOutput === 'boolean') {
         normalized.songFollowsOutput = record.songFollowsOutput;

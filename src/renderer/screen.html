@@ -93,12 +93,17 @@
                     <b>Match each song</b> reads the song's tuning and shifts per note for Drop D and other mixed tunings. A <b>fixed shift</b> is for charts with a wrong tuning, an instrument that's already tuned down, or playing without a chart.
                     <b>Works well:</b> single notes, bends, slides and vibrato at any shift; power chords and octaves at any shift; all chords up to about 2 semitones (Eb, D, Drop D).
                     <b>Limits:</b> full chords (with a 3rd) and dissonant chords sound rougher from about 3 semitones, clearly at 5–6 or more; a chord across strings with different shifts (a guitar Drop D power chord) gets one shift for all its notes, so it sounds wrong — tune that string down for real; large shifts also change the tone (darker down, thinner up). The line below warns when the current song is affected.</span>
-                <label class="flex items-center gap-2 cursor-pointer mt-2">
-                    <input type="checkbox" id="ae-drop-tune-refret" checked
-                           class="w-4 h-4 rounded bg-slate-700 border-slate-600 accent-emerald-500">
-                    <span class="text-sm text-slate-300">Re-fret drop tunings (Drop D, Drop C, …) so chords stay right</span>
-                </label>
-                <span class="text-xs text-slate-500">With Match each song: when a drop-tuned part plays chords across the dropped string, shift all strings by the dropped amount and show the other strings' frets higher to match (Drop D → D standard, upper strings +2 frets: the one-finger D5 becomes the normal power-chord shape). Bass lines and single-note parts keep per-note shifting. Off: the chart stays as written and those chords get one shift for all their notes.</span>
+                <label for="ae-drop-tune-refret" class="block text-xs text-slate-400 mb-1 mt-2">Re-fret the chart</label>
+                <select id="ae-drop-tune-refret" class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm">
+                    <option value="auto">Auto: only where it's needed (recommended)</option>
+                    <option value="always">Always: every drop tuning too</option>
+                    <option value="off">Off: play the chart as written</option>
+                </select>
+                <span class="text-xs text-slate-500">Re-fretting makes your instrument a plain standard tuning shifted down (e.g. −2 = D standard) and moves the chart's frets to fit, so all your usual shapes and scale patterns stay the same. Drop D → D standard: the low string as written, the other strings +2 frets.
+                    <b>Auto</b> — Match each song: only drop-tuned parts with chords across the dropped string (bass lines and single-note parts keep per-note shifting, which keeps the drop fingering); a fixed shift: whenever the song's tuning differs from it (Drop D or Eb standard with −2), so the notes are right.
+                    <b>Always</b> — Match each song re-frets every drop tuning, also bass and single-note parts.
+                    <b>Off</b> — the chart stays as written: with Match each song, drop-string chords get one shift for all their notes; with a fixed shift, strings whose tuning differs from it play wrong notes.
+                    A fixed shift can't re-fret a song tuned lower than the shift (frets would go below 0).</span>
                 <div id="ae-drop-tune-status" class="text-xs text-emerald-400 mt-1 hidden"></div>
             </div>
             <div class="md:col-span-2">
