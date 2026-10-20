@@ -292,11 +292,22 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // A note for the status line when this song hits a known limitation, or ''.
     // Thresholds from the measurements: full chords degrade noticeably from
     // about 3 semitones (guitar take: C major at -6 35 % vs 75 % offline).
-    function virtualTuningWarning(profile, perString) {
-        if (!profile || profile.total < 20) return '';
-        const big = Math.max(...perString.map((v) => Math.abs(v)));
-        const pct = (n) => Math.round((100 * n) / profile.total);
+    // From VT_BIG_SHIFT semitones the shift itself is the problem, chords or not
+    // (tested on guitar: Meshuggah's low F at −11 sounds bad), so that warning
+    // comes first and doesn't need a chord count.
+    const VT_BIG_SHIFT = 7;
+    function virtualTuningWarning(profile, perString, isBass) {
+        const big = Array.isArray(perString) && perString.length
+            ? Math.max(...perString.map((v) => Math.abs(Number(v) || 0))) : 0;
         const parts = [];
+        if (big >= VT_BIG_SHIFT) {
+            const down = perString.some((v) => v <= -VT_BIG_SHIFT);
+            parts.push(`⚠ ${big} semitones is a big shift: the tone gets clearly processed `
+                + `(${down ? 'muffled' : 'thin'}), so it can sound bad. Retune for real${down
+                    ? `, or use ${isBass ? 'a 5-string bass' : 'a 7- or 8-string guitar'}` : ''}.`);
+        }
+        if (!profile || profile.total < 20) return parts.join(' ');
+        const pct = (n) => Math.round((100 * n) / profile.total);
         if (profile.split && pct(profile.split) >= 10) {
             parts.push(`⚠ ${pct(profile.split)}% of the chords span strings with different shifts `
                 + '(e.g. Drop D power chords): they get one shift for all their notes, so they sound wrong. '
@@ -517,7 +528,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 vtStatus('Match each song: this song has no tuning information.');
                 return;
             }
-            const warning = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString);
+            const warning = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString, song.isBass);
             const transformed = typeof hw.getChartTransform === 'function' ? hw.getChartTransform() : null;
             const refretPlan = transformed && transformed.id === VT_REFRET_PROVIDER ? vtRefretApplied : null;
             const refretNote = refretPlan
@@ -542,7 +553,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const sc = Number(song.stringCount) || (Array.isArray(song.tuning) ? song.tuning.length : 0) || 6;
             perString = new Array(sc).fill(mode);
             publishVirtualTuning(true, 'manual');
-            const fixedWarning = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString);
+            const fixedWarning = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString, song.isBass);
             // The chart against this shift: re-fretted to fit, already fitting,
             // or (re-fret off / impossible) played as written with wrong notes.
             const transformed = typeof hw.getChartTransform === 'function' ? hw.getChartTransform() : null;

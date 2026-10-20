@@ -344,3 +344,17 @@ test('fixed re-fret chart: Drop D one-finger D5 becomes the normal shape at -2',
     assert.deepEqual(plain(out.chords[0].notes.map((n) => n.f)), [0, 2, 2]);
     assert.deepEqual(plain(out.tuning), [-2, -2, -2, -2, -2, -2]);
 });
+
+test('big shifts warn on their own, with the instrument that fits', () => {
+    const none = { total: 0, full: 0, split: 0 };
+    const meshuggah = [-11, -11, -11, -11, -10, -10];
+    assert.match(warning(none, meshuggah), /^⚠ 11 semitones is a big shift: the tone gets clearly processed \(muffled\)/);
+    assert.match(warning(none, meshuggah), /a 7- or 8-string guitar\.$/);
+    assert.match(warning(none, [-7, -7, -7, -7], true), /a 5-string bass\.$/);
+    assert.match(warning(none, [7, 7, 7, 7, 7, 7]), /\(thin\), so it can sound bad\. Retune for real\.$/);
+    assert.equal(warning(none, [-6, -6, -6, -6]), '', 'below 7: no shift warning');
+    // With full chords too, both notes.
+    const chordy = { total: 30, full: 10, split: 0 };
+    const both = warning(chordy, [-7, -7, -7, -7, -7, -7]);
+    assert.match(both, /^⚠ 7 semitones is a big shift.*⚠ 33% of the chords are full chords/);
+});
