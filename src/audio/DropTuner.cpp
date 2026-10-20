@@ -48,6 +48,7 @@ void DropTuner::prepare(double sampleRate)
     aFast = std::exp(-1.0 / (0.001 * sr));
     aSlow = std::exp(-1.0 / (0.050 * sr));
     onsetHoldoff = std::max(1, (int) std::lround(kOnsetHoldoffMs * sr / 1000.0));
+    attackLen = std::max(1, (int) std::lround(kAttackMs * sr / 1000.0));
 
     // Analysis path: windowed-sinc lowpass (Blackman) at 0.45 x the analysis
     // rate, evaluated once per `decim` input samples straight from `ring`.
@@ -131,6 +132,26 @@ void DropTuner::reset() noexcept
     lastSongTime = -1e300;                         // re-sync the chart position
     haveClock = false;
     seenClockGen = clockGen.load(std::memory_order_acquire) - 1;  // re-read the clock
+    avgDelay = 0.0;
+    avgSeeded = false;
+    attackSum = 0.0;
+    attackN = 0;
+    statShifting.store(false, std::memory_order_relaxed);
+    statNowMs.store(0.0f, std::memory_order_relaxed);
+    statAvgMs.store(0.0f, std::memory_order_relaxed);
+    statAttackMs.store(0.0f, std::memory_order_relaxed);
+    statPlucks.store(0, std::memory_order_relaxed);
+}
+
+DropTuner::DelayStats DropTuner::getDelayStats() const noexcept
+{
+    DelayStats d;
+    d.shifting = statShifting.load(std::memory_order_relaxed);
+    d.nowMs = statNowMs.load(std::memory_order_relaxed);
+    d.averageMs = statAvgMs.load(std::memory_order_relaxed);
+    d.attackMs = statAttackMs.load(std::memory_order_relaxed);
+    d.plucks = statPlucks.load(std::memory_order_relaxed);
+    return d;
 }
 
 DropTuner::~DropTuner()
@@ -168,9 +189,10 @@ void DropTuner::clearChart()
     setChart({}, {}, {}, {});
 }
 
-void DropTuner::setClock(double songTime, bool playing) noexcept
+void DropTuner::setClock(double songTime, bool playing, double rate) noexcept
 {
     if (!std::isfinite(songTime)) return;
+    clockRate.store(std::isfinite(rate) ? std::clamp(rate, 0.05, 4.0) : 1.0, std::memory_order_relaxed);
     clockTime.store(songTime, std::memory_order_relaxed);
     clockPlaying.store(playing, std::memory_order_relaxed);
     clockGen.fetch_add(1, std::memory_order_release);
@@ -390,12 +412,15 @@ bool DropTuner::process(float* samples, int numSamples) noexcept
         seenClockGen = gen;
         baseTime = clockTime.load(std::memory_order_relaxed);
         basePlaying = clockPlaying.load(std::memory_order_relaxed);
+        baseRate = clockRate.load(std::memory_order_relaxed);
         baseWritten = written;
         haveClock = true;
     }
     const float req = requested.load(std::memory_order_relaxed);
     const bool followShifts = chart != nullptr && ! chart->shiftT.empty();
     const bool primed = chart != nullptr && ! chart->noteT.empty();
+    double blockDelaySum = 0.0;
+    int blockDelayN = 0;
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -427,7 +452,7 @@ bool DropTuner::process(float* samples, int numSamples) noexcept
         if (followShifts || primed)
         {
             const double now = ! haveClock ? -1e300
-                : basePlaying ? baseTime + (double) (written - baseWritten) / sr : baseTime;
+                : basePlaying ? baseTime + (double) (written - baseWritten) / sr * baseRate : baseTime;
             if (now < lastSongTime - kSeekBackSec || now > lastSongTime + kSeekForwardSec)
                 syncChartTo(now);
             lastSongTime = now;
@@ -457,6 +482,8 @@ bool DropTuner::process(float* samples, int numSamples) noexcept
                         hint = period = sr / chart->noteHz[best];
                         sincePluck = 0;
                         restartPending = true;
+                        attackSum = 0.0;
+                        attackN = 0;
                     }
                 }
             }
@@ -514,14 +541,31 @@ bool DropTuner::process(float* samples, int numSamples) noexcept
         }
 
         float y;
+        double effDelay;                           // what this output sample lags the input by
         if (xfadeLeft > 0)
         {
             const double g = 1.0 - (double) xfadeLeft / xfadeLen;
             y = (float) ((1.0 - g) * readAt(delay) + g * readAt(newDelay));
+            effDelay = (1.0 - g) * delay + g * newDelay;
         }
         else
         {
             y = readAt(delay);
+            effDelay = delay;
+        }
+        blockDelaySum += effDelay;
+        ++blockDelayN;
+        if (sincePluck < (uint64_t) attackLen)
+        {
+            attackSum += effDelay;
+            ++attackN;
+        }
+        else if (attackN > 0)
+        {
+            statAttackMs.store((float) (attackSum / attackN * 1000.0 / sr), std::memory_order_relaxed);
+            statPlucks.fetch_add(1, std::memory_order_relaxed);
+            attackSum = 0.0;
+            attackN = 0;
         }
         delay += 1.0 - rate;
         if (xfadeLeft > 0)
@@ -531,6 +575,23 @@ bool DropTuner::process(float* samples, int numSamples) noexcept
         }
         samples[i] = y;
         touched = true;
+    }
+
+    if (blockDelayN > 0)
+    {
+        const double mean = blockDelaySum / blockDelayN;
+        // ~1 s average over the time spent shifting.
+        const double a = 1.0 - std::exp(-(double) blockDelayN / sr / 1.0);
+        avgDelay = avgSeeded ? avgDelay + a * (mean - avgDelay) : mean;
+        avgSeeded = true;
+        statNowMs.store((float) (mean * 1000.0 / sr), std::memory_order_relaxed);
+        statAvgMs.store((float) (avgDelay * 1000.0 / sr), std::memory_order_relaxed);
+        statShifting.store(true, std::memory_order_relaxed);
+    }
+    else
+    {
+        statNowMs.store(0.0f, std::memory_order_relaxed);
+        statShifting.store(false, std::memory_order_relaxed);
     }
     return touched;
 }

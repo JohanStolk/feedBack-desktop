@@ -228,6 +228,22 @@ double AudioEngine::getLatencyMs() const
     return (totalSamples / sr) * 1000.0;
 }
 
+AudioEngine::EngineStats AudioEngine::takeEngineStats()
+{
+    EngineStats st;
+    st.running = audioRunning.load(std::memory_order_relaxed);
+    st.duplex = duplexMode.load(std::memory_order_relaxed);
+    st.inputLoad = inputLoad.getAverage();
+    st.inputPeak = inputLoad.takePeak();
+    if (! st.duplex)
+    {
+        st.outputLoad = outputLoad.getAverage();
+        st.outputPeak = outputLoad.takePeak();
+    }
+    st.dropTune = source0().getDropTuneDelayStats();
+    return st;
+}
+
 AudioEngine::LatencyBreakdown AudioEngine::getLatencyBreakdown() const
 {
     LatencyBreakdown b;
@@ -785,6 +801,7 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
             (int) inputCallbackRegistered, (int) outputCallbackRegistered);
     currentSampleRate.store(sr, std::memory_order_relaxed);
     inputBlockSize.store(bs, std::memory_order_relaxed);
+    inputLoad.reset();
     if (duplexMode.load(std::memory_order_relaxed))
         outputBlockSize.store(bs, std::memory_order_relaxed);
 
@@ -868,6 +885,8 @@ void AudioEngine::audioOutputAboutToStart(juce::AudioIODevice* device)
         fprintf(stderr, "[diag] audioOutputAboutToStart: dev='%s' sr=%.0f bs=%d\n",
             device->getName().toRawUTF8(), device->getCurrentSampleRate(), bs);
     outputBlockSize.store(bs, std::memory_order_relaxed);
+    outputSampleRate.store(device->getCurrentSampleRate(), std::memory_order_relaxed);
+    outputLoad.reset();
 
     if ((int) outputPullScratchL.size() < bs) outputPullScratchL.assign((size_t) bs, 0.0f);
     if ((int) outputPullScratchR.size() < bs) outputPullScratchR.assign((size_t) bs, 0.0f);
@@ -951,6 +970,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     // is 10-100× slower — producing sporadic CPU spikes → buffer underruns heard
     // as random "scratches" + frame stutter. Scoped so it only affects this path.
     const juce::ScopedNoDenormals noDenormals;
+    const slopsmith::CallbackLoad::Scope loadScope(inputLoad, numSamples,
+                                                   currentSampleRate.load(std::memory_order_relaxed));
 
     // Publish that the callback body is executing so removeSource() and deferred-
     // release reclamation know when no source is being processed (the body is
@@ -1132,6 +1153,8 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
     // carry IIR/decay state too, so flush denormals here as well — the primary
     // callback's ScopedNoDenormals does NOT reach this separate output thread.
     const juce::ScopedNoDenormals noDenormals;
+    const slopsmith::CallbackLoad::Scope loadScope(outputLoad, numSamples,
+                                                   outputSampleRate.load(std::memory_order_relaxed));
 
     juce::AudioBuffer<float> buffer(outputData, numOutputChannels, numSamples);
     if (numOutputChannels <= 0)

@@ -1,4 +1,5 @@
 #pragma once
+#include "CallbackLoad.h"
 #include "SourceChain.h"
 #include "GainSanitize.h"
 #include "engine/PackedStereoRing.h"
@@ -204,9 +205,9 @@ public:
     {
         pool.forEach([](SourceChain& s) { s.clearDropTuneChart(); });
     }
-    void setDropTuneClock(double songTime, bool playing)
+    void setDropTuneClock(double songTime, bool playing, double rate = 1.0)
     {
-        pool.forEach([songTime, playing](SourceChain& s) { s.setDropTuneClock(songTime, playing); });
+        pool.forEach([songTime, playing, rate](SourceChain& s) { s.setDropTuneClock(songTime, playing, rate); });
     }
 
     // Number of audio blocks whose signal-chain output had to be scrubbed for
@@ -300,6 +301,24 @@ public:
     // Producer overflow (drop-oldest): the consumer fell a full ring behind and
     // frames were skipped. Exposed alongside underflow for stream drift diagnosis.
     uint64_t getStreamOverflowCount() const { return streamSink.getOverflowCount(); }
+
+    // Live engine figures for the Audio screen and the player (any thread).
+    // Load: the share of each callback's time budget the processing used
+    // (1.0 = all of it; more underruns, heard as crackles), smoothed over
+    // ~0.5 s, plus the worst block since the previous call. The input
+    // callback runs the instrument chain; in split mode a second callback
+    // on the output device mixes the song (outputLoad stays 0 in duplex).
+    // dropTune: the delay virtual tuning adds (source 0, see DropTuner).
+    struct EngineStats
+    {
+        bool running = false;
+        bool duplex = true;
+        float inputLoad = 0.0f, inputPeak = 0.0f;
+        float outputLoad = 0.0f, outputPeak = 0.0f;
+        slopsmith::DropTuner::DelayStats dropTune;
+    };
+    // Takes the peaks (each call reports the worst block since the last one).
+    EngineStats takeEngineStats();
 
     // Latency
     double getLatencyMs() const;
@@ -439,6 +458,10 @@ private:
         AudioEngine& engine;
     };
     OutputCallback outputCallback{ *this };
+
+    // Callback time budget used, per device callback (see EngineStats).
+    slopsmith::CallbackLoad inputLoad, outputLoad;
+    std::atomic<double> outputSampleRate { 0.0 };
 
     // Probe/apply/teardown moved to engine/DeviceSetup (TLC phase 4);
     // setAudioDevices stays here as the orchestrator.

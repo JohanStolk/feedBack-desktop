@@ -23,7 +23,9 @@ function loadHelpers() {
         this.virtualTuningWarning = virtualTuningWarning;
         this.virtualTuningRefretPlan = virtualTuningRefretPlan;
         this.virtualTuningRefretChart = virtualTuningRefretChart;
-        this.virtualTuningNeedsRefret = virtualTuningNeedsRefret;`, ctx);
+        this.virtualTuningNeedsRefret = virtualTuningNeedsRefret;
+        this.virtualTuningFixedRefretPlan = virtualTuningFixedRefretPlan;
+        this.virtualTuningRefretFor = virtualTuningRefretFor;`, ctx);
     return ctx;
 }
 
@@ -38,6 +40,8 @@ const {
     virtualTuningRefretPlan: refretPlan,
     virtualTuningRefretChart: refretChart,
     virtualTuningNeedsRefret: needsRefret,
+    virtualTuningFixedRefretPlan: fixedPlan,
+    virtualTuningRefretFor: refretFor,
 } = loadHelpers();
 
 // vm objects come from another realm; compare as plain JSON values.
@@ -289,4 +293,68 @@ test('re-fret is only needed where per-note shifting fails: chords across the dr
     const dropDBass = { tuning: [-2, 0, 0, 0, 0, 0], stringCount: 4, isBass: true };
     const ds = chordOf([0, 0, null, null]);
     assert.equal(needsRefret(dropDBass, [ds, ...many(chordOf([null, 2, 2, null]), 40)]), false);
+});
+
+// ── Fixed shifts that re-fret to the song ───────────────────────────────────
+
+test('fixed shift re-frets the chart to fit: Drop D and Eb standard at -2', () => {
+    const dropD = fixedPlan({ tuning: [-2, 0, 0, 0, 0, 0] }, -2);
+    assert.deepEqual(plain(dropD), { low: -2, add: [0, 2, 2, 2, 2, 2], tuning: [-2, -2, -2, -2, -2, -2] });
+    assert.deepEqual(plain(fixedPlan({ tuning: [-1, -1, -1, -1, -1, -1] }, -2)).add, [1, 1, 1, 1, 1, 1]);
+    // E standard at -2: everything 2 frets up (the notes stay right).
+    assert.deepEqual(plain(fixedPlan({ tuning: [0, 0, 0, 0, 0, 0] }, -2)).add, [2, 2, 2, 2, 2, 2]);
+});
+
+test('fixed shift: nothing to do when the chart already fits', () => {
+    assert.equal(fixedPlan({ tuning: [-2, -2, -2, -2, -2, -2] }, -2), null);
+    // Extended-range bass: [7,7,7,7] with -1200 cents is B standard = -5.
+    assert.equal(fixedPlan({ tuning: [7, 7, 7, 7, 7, 7], stringCount: 4, centOffset: -1200 }, -5), null);
+    // A few cents off (A443) rounds away.
+    assert.equal(fixedPlan({ tuning: [-2, -2, -2, -2], centOffset: 11.8 }, -2), null);
+});
+
+test('fixed shift: a song tuned lower than the shift can\'t re-fret', () => {
+    assert.deepEqual(plain(fixedPlan({ tuning: [-5, -5, -5, -5, -5, -5] }, -2)), { blocked: [0, 1, 2, 3, 4, 5] });
+    assert.deepEqual(plain(fixedPlan({ tuning: [-4, -2, -2, -2, -2, -2] }, -2)), { blocked: [0] }, 'Drop C at -2');
+    assert.equal(fixedPlan(null, -2), null);
+    assert.equal(fixedPlan({ tuning: [0, 0] }, NaN), null);
+});
+
+test('re-fret setting: auto / always / off, per mode', () => {
+    const song = { tuning: [-2, 0, 0, 0, 0, 0] };
+    const power = [];
+    for (let i = 0; i < 10; i++) power.push({ t: i, notes: [{ s: 0, f: 0 }, { s: 1, f: 0 }, { s: 2, f: 0 }] });
+    const single = [];
+    // Match each song: auto only with chords across the dropped string.
+    assert.deepEqual(plain(refretFor(song, power, 'auto', 'auto')).add, [0, 2, 2, 2, 2, 2]);
+    assert.equal(refretFor(song, single, 'auto', 'auto'), null, 'single-note part keeps per-note shifts');
+    assert.deepEqual(plain(refretFor(song, single, 'auto', 'always')).add, [0, 2, 2, 2, 2, 2]);
+    assert.equal(refretFor(song, power, 'auto', 'off'), null);
+    // Fixed: auto and always both re-fret a chart that doesn't fit.
+    assert.deepEqual(plain(refretFor(song, single, -2, 'auto')).add, [0, 2, 2, 2, 2, 2]);
+    assert.deepEqual(plain(refretFor(song, single, -2, 'always')).add, [0, 2, 2, 2, 2, 2]);
+    assert.equal(refretFor(song, single, -2, 'off'), null);
+    assert.deepEqual(plain(refretFor({ tuning: [-5, -5, -5, -5, -5, -5] }, single, -2, 'auto')), { blocked: [0, 1, 2, 3, 4, 5] });
+    assert.equal(refretFor(song, power, 0, 'always'), null, 'virtual tuning off');
+});
+
+test('fixed re-fret chart: Drop D one-finger D5 becomes the normal shape at -2', () => {
+    const plan = fixedPlan({ tuning: [-2, 0, 0, 0, 0, 0] }, -2);
+    const out = refretChart({ notes: [], chords: [{ t: 1, notes: [{ s: 0, f: 0 }, { s: 1, f: 0 }, { s: 2, f: 0 }] }] }, plan);
+    assert.deepEqual(plain(out.chords[0].notes.map((n) => n.f)), [0, 2, 2]);
+    assert.deepEqual(plain(out.tuning), [-2, -2, -2, -2, -2, -2]);
+});
+
+test('big shifts warn on their own, with the instrument that fits', () => {
+    const none = { total: 0, full: 0, split: 0 };
+    const meshuggah = [-11, -11, -11, -11, -10, -10];
+    assert.match(warning(none, meshuggah), /^⚠ 11 semitones is a big shift: the tone gets clearly processed \(muffled\)/);
+    assert.match(warning(none, meshuggah), /a 7- or 8-string guitar\.$/);
+    assert.match(warning(none, [-7, -7, -7, -7], true), /a 5-string bass\.$/);
+    assert.match(warning(none, [7, 7, 7, 7, 7, 7]), /\(thin\), so it can sound bad\. Retune for real\.$/);
+    assert.equal(warning(none, [-6, -6, -6, -6]), '', 'below 7: no shift warning');
+    // With full chords too, both notes.
+    const chordy = { total: 30, full: 10, split: 0 };
+    const both = warning(chordy, [-7, -7, -7, -7, -7, -7]);
+    assert.match(both, /^⚠ 7 semitones is a big shift.*⚠ 33% of the chords are full chords/);
 });

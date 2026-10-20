@@ -28,7 +28,9 @@ type AudioDeviceSettings = {
     dropTuneSemitones?: number;
     // Magical tuning: the shift follows each song's tuning (renderer-driven).
     dropTuneAuto?: boolean;
-    // Re-fret drop tunings (chart transform) with Match each song; default on.
+    // Re-fret the chart (chart transform): 'auto' (default), 'always', 'off'.
+    dropTuneRefretMode?: 'auto' | 'always' | 'off';
+    // Older on/off form (on = auto); still written for older builds.
     dropTuneRefret?: boolean;
     // Play the song (page audio) on the engine's output device; default on.
     songFollowsOutput?: boolean;
@@ -105,6 +107,10 @@ function normalizeDeviceSettings(settings: unknown): AudioDeviceSettings | null 
     }
     if (typeof record.dropTuneRefret === 'boolean') {
         normalized.dropTuneRefret = record.dropTuneRefret;
+    }
+    if (record.dropTuneRefretMode === 'auto' || record.dropTuneRefretMode === 'always'
+        || record.dropTuneRefretMode === 'off') {
+        normalized.dropTuneRefretMode = record.dropTuneRefretMode;
     }
     if (typeof record.songFollowsOutput === 'boolean') {
         normalized.songFollowsOutput = record.songFollowsOutput;
@@ -667,6 +673,13 @@ export function initAudioBridge(): void {
         return typeof audio?.getDropTuneSemitones === 'function' ? audio.getDropTuneSemitones() : 0;
     });
 
+    // Live callback load + virtual-tuning delay (src/audio/AudioEngine.h,
+    // EngineStats). Polled by the Audio screen and the player's Tuning panel;
+    // each call takes the peaks since the previous one. null without the addon.
+    ipcMain.handle('audio:getEngineStats', () => {
+        return typeof audio?.getEngineStats === 'function' ? audio.getEngineStats() : null;
+    });
+
     // Per-song virtual-tuning chart: shift change points and each note's
     // expected input pitch (see src/audio/DropTuner.h). Anything that isn't a
     // plain object clears it; the addon validates the arrays.
@@ -677,10 +690,13 @@ export function initAudioBridge(): void {
     });
 
     // Song clock for the chart, pushed about once per frame while a chart is set.
-    ipcMain.handle('audio:setDropTuneClock', (_event, songTime: unknown, playing: unknown) => {
+    // `rate`: the practice speed (song seconds per second), so the engine's
+    // extrapolation between pushes matches slowed playback; default 1.
+    ipcMain.handle('audio:setDropTuneClock', (_event, songTime: unknown, playing: unknown, rate: unknown) => {
         if (!audio || typeof audio.setDropTuneClock !== 'function') return;
         if (typeof songTime !== 'number' || !Number.isFinite(songTime)) return;
-        audio.setDropTuneClock(songTime, playing !== false);
+        const r = typeof rate === 'number' && Number.isFinite(rate) && rate > 0 ? rate : 1;
+        audio.setDropTuneClock(songTime, playing !== false, r);
     });
 
     ipcMain.handle(

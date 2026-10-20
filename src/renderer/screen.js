@@ -129,7 +129,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             monitorKill: monitorKillCheckbox.checked,
             dropTuneSemitones: dropTuneSelect && dropTuneSelect.value !== 'auto' ? Number(dropTuneSelect.value) || 0 : 0,
             dropTuneAuto: dropTuneSelect ? dropTuneSelect.value === 'auto' : false,
-            dropTuneRefret: dropTuneRefretCheckbox ? dropTuneRefretCheckbox.checked : true,
+            dropTuneRefretMode: vtRefretSetting(),
+            dropTuneRefret: vtRefretEnabled(),          // older builds read this
             songFollowsOutput: songOutputCheckbox ? songOutputCheckbox.checked : true,
         };
     }
@@ -291,11 +292,22 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // A note for the status line when this song hits a known limitation, or ''.
     // Thresholds from the measurements: full chords degrade noticeably from
     // about 3 semitones (guitar take: C major at -6 35 % vs 75 % offline).
-    function virtualTuningWarning(profile, perString) {
-        if (!profile || profile.total < 20) return '';
-        const big = Math.max(...perString.map((v) => Math.abs(v)));
-        const pct = (n) => Math.round((100 * n) / profile.total);
+    // From VT_BIG_SHIFT semitones the shift itself is the problem, chords or not
+    // (tested on guitar: Meshuggah's low F at −11 sounds bad), so that warning
+    // comes first and doesn't need a chord count.
+    const VT_BIG_SHIFT = 7;
+    function virtualTuningWarning(profile, perString, isBass) {
+        const big = Array.isArray(perString) && perString.length
+            ? Math.max(...perString.map((v) => Math.abs(Number(v) || 0))) : 0;
         const parts = [];
+        if (big >= VT_BIG_SHIFT) {
+            const down = perString.some((v) => v <= -VT_BIG_SHIFT);
+            parts.push(`⚠ ${big} semitones is a big shift: the tone gets clearly processed `
+                + `(${down ? 'muffled' : 'thin'}), so it can sound bad. Retune for real${down
+                    ? `, or use ${isBass ? 'a 5-string bass' : 'a 7- or 8-string guitar'}` : ''}.`);
+        }
+        if (!profile || profile.total < 20) return parts.join(' ');
+        const pct = (n) => Math.round((100 * n) / profile.total);
         if (profile.split && pct(profile.split) >= 10) {
             parts.push(`⚠ ${pct(profile.split)}% of the chords span strings with different shifts `
                 + '(e.g. Drop D power chords): they get one shift for all their notes, so they sound wrong. '
@@ -376,6 +388,45 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         return out;
     }
 
+    // Re-fret plan for a FIXED shift: the player's instrument becomes uniform
+    // `semis` (e.g. −2 = D standard) and every string's frets move by the
+    // song's offset minus that (Drop D at −2: low string 0, the others +2;
+    // Eb standard at −2: all +1). null when the chart already fits. Frets
+    // can't go below 0, so a song tuned higher than the shift on some string
+    // returns { blocked: [string indexes] } instead.
+    function virtualTuningFixedRefretPlan(song, semis) {
+        if (!song || !Array.isArray(song.tuning) || !Number.isFinite(semis)) return null;
+        const declared = Number(song.stringCount);
+        const sc = Number.isInteger(declared) && declared > 0 ? declared : song.tuning.length;
+        if (!sc) return null;
+        const cents = Number(song.centOffset);
+        const base = Number.isFinite(cents) ? cents / 100 : 0;
+        const off = [];
+        for (let s = 0; s < sc; s++) {
+            const v = Number(song.tuning[s]);
+            off.push(Number.isFinite(v) ? v : 0);
+        }
+        const add = off.map((v) => Math.round(v + base - semis) || 0);
+        if (add.every((d) => d === 0)) return null;
+        const blocked = add.map((d, i) => (d < 0 ? i : -1)).filter((i) => i >= 0);
+        if (blocked.length) return { blocked };
+        return { low: semis, add, tuning: off.map((v, i) => v - add[i]) };
+    }
+
+    // Which re-fret applies to a part, from the virtual-tuning `mode` ('auto'
+    // or fixed semitones) and the re-fret setting: 'auto' (match each song:
+    // only chord parts across a dropped string; fixed: whenever the chart
+    // doesn't fit the shift), 'always' (match each song: every mixed tuning),
+    // 'off'. Returns a plan, { blocked } (fixed shift can't fit), or null.
+    function virtualTuningRefretFor(song, chords, mode, setting) {
+        if (setting === 'off' || mode === 0 || mode == null) return null;
+        if (mode === 'auto') {
+            if (setting !== 'always' && !virtualTuningNeedsRefret(song, chords)) return null;
+            return virtualTuningRefretPlan(song);
+        }
+        return virtualTuningFixedRefretPlan(song, Number(mode));
+    }
+
     // Re-fret only where per-note shifting can't work: a mixed tuning whose
     // part has chords across strings with different shifts (guitar Drop D
     // power chords). Bass lines and single-note parts keep per-note shifts,
@@ -443,7 +494,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         // Re-fret wanted but its provider not selected yet (e.g. a song started
         // before start-up finished): select it now; the re-staged chart then
         // triggers another refresh through the transform.
-        if (auto && vtRefretEnabled() && !hookState.vtRefretSelected) vtSyncRefretProvider();
+        if (mode !== 0 && vtRefretEnabled() && !hookState.vtRefretSelected) vtSyncRefretProvider();
         if (!auto && mode === 0) { publishVirtualTuning(false, 'manual'); vtStatus(''); return; }
         const hw = window.highway;
         const notes = hw && typeof hw.getNotes === 'function' ? hw.getNotes() : null;
@@ -477,7 +528,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 vtStatus('Match each song: this song has no tuning information.');
                 return;
             }
-            const warning = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString);
+            const warning = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString, song.isBass);
             const transformed = typeof hw.getChartTransform === 'function' ? hw.getChartTransform() : null;
             const refretPlan = transformed && transformed.id === VT_REFRET_PROVIDER ? vtRefretApplied : null;
             const refretNote = refretPlan
@@ -502,10 +553,36 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const sc = Number(song.stringCount) || (Array.isArray(song.tuning) ? song.tuning.length : 0) || 6;
             perString = new Array(sc).fill(mode);
             publishVirtualTuning(true, 'manual');
-            const fixedWarning = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString);
-            vtShortLabel = `${vtFmtSemis(mode)} fixed${fixedWarning ? ' ⚠' : ''}`;
-            const fixedText = [`Fixed shift: ${vtFmtSemis(mode)} semitone${Math.abs(mode) === 1 ? '' : 's'} on all strings `
-                + '(the chart stays as written).', fixedWarning].filter(Boolean).join(' ');
+            const fixedWarning = virtualTuningWarning(virtualTuningChordProfile(chords, song, perString), perString, song.isBass);
+            // The chart against this shift: re-fretted to fit, already fitting,
+            // or (re-fret off / impossible) played as written with wrong notes.
+            const transformed = typeof hw.getChartTransform === 'function' ? hw.getChartTransform() : null;
+            const fixedPlan = transformed && transformed.id === VT_REFRET_PROVIDER ? vtRefretApplied : null;
+            const info = hw.getSongInfo?.() || {};
+            const original = { ...song, tuning: Array.isArray(info.tuning) ? info.tuning : song.tuning, centOffset: info.centOffset };
+            const fit = fixedPlan ? null : virtualTuningFixedRefretPlan(original, mode);
+            const strings = (idx) => idx.map((i) => i + 1).join(', ');
+            let chartNote;
+            let chartWarn = false;
+            if (fixedPlan) {
+                chartNote = `Re-fretted to fit: ${fixedPlan.add.map((d, i) => (d ? `string ${i + 1} ${d > 0 ? '+' : ''}${d}` : null))
+                    .filter(Boolean).join(', ')} frets (as shown on the highway).`;
+            } else if (fit && fit.blocked) {
+                chartWarn = true;
+                chartNote = `⚠ This song is tuned lower than ${vtFmtSemis(mode)} on string ${strings(fit.blocked)}: `
+                    + 're-fretting would need frets below 0, so the chart plays as written and the notes are off. '
+                    + 'Use Match each song or a bigger shift.';
+            } else if (fit) {
+                chartWarn = true;
+                const off = fit.add.map((d, i) => (d ? i : -1)).filter((i) => i >= 0);
+                chartNote = `⚠ The chart doesn't match this shift (re-fret is Off): string ${strings(off)} play wrong notes. `
+                    + 'Set Re-fret to Auto, or use Match each song.';
+            } else {
+                chartNote = 'The chart matches this shift.';
+            }
+            vtShortLabel = `${vtFmtSemis(mode)} fixed${fixedPlan ? ' · re-fret' : ''}${fixedWarning || chartWarn ? ' ⚠' : ''}`;
+            const fixedText = [`Fixed shift: ${vtFmtSemis(mode)} semitone${Math.abs(mode) === 1 ? '' : 's'} on all strings.`,
+                chartNote, fixedWarning].filter(Boolean).join(' ');
             vtLastSong = fixedText ? { title: vtSongTitle(hw), text: fixedText } : null;
             vtStatus(fixedText);
         }
@@ -516,14 +593,20 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         Promise.resolve(api.setDropTuneChart(chart))
             .catch((e) => console.warn('[audio-engine] virtual tuning: setDropTuneChart failed:', e));
         vtChartSet = true;
-        // Song clock for the engine, every frame. A plain getter read plus one
-        // IPC message; no DOM work.
+        // Song clock for the engine, every frame, with the practice speed so
+        // its extrapolation between frames matches slowed playback. Plain
+        // property reads plus one IPC message; no DOM work.
         const bus = window.feedBack || window.slopsmith;
+        const audioEl = document.getElementById('audio');   // once per song, not per frame
+        const speed = () => {
+            const v = window._juceMode ? (window.jucePlayer && window.jucePlayer._speed) : (audioEl && audioEl.playbackRate);
+            return Number.isFinite(v) && v > 0 ? v : 1;
+        };
         const tick = () => {
             hookState.vtRaf = requestAnimationFrame(tick);
             const t = Number(hw.getTime?.());
             if (!Number.isFinite(t)) return;
-            Promise.resolve(api.setDropTuneClock?.(t, !!(bus && bus.isPlaying))).catch(() => {});
+            Promise.resolve(api.setDropTuneClock?.(t, !!(bus && bus.isPlaying), speed())).catch(() => {});
         };
         tick();
         console.info('[audio-engine] virtual tuning:', auto ? 'match song' : `fixed ${mode}`, perString,
@@ -564,9 +647,15 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     }
     // ── Re-fret drop tunings (chart-transform provider) ───────────────────
     const VT_REFRET_PROVIDER = 'audio_engine.virtual-tuning-refret';
-    const dropTuneRefretCheckbox = $('ae-drop-tune-refret');
+    const dropTuneRefretSelect = $('ae-drop-tune-refret');
     let vtRefretApplied = null;     // the plan the last transform applied, or null
-    function vtRefretEnabled() { return dropTuneRefretCheckbox ? dropTuneRefretCheckbox.checked : true; }
+    let vtRefretBlocked = null;     // fixed shift that can't fit this song: string indexes
+    const VT_REFRET_MODES = ['auto', 'always', 'off'];
+    function vtRefretSetting() {
+        const v = dropTuneRefretSelect ? dropTuneRefretSelect.value : 'auto';
+        return VT_REFRET_MODES.includes(v) ? v : 'auto';
+    }
+    function vtRefretEnabled() { return vtRefretSetting() !== 'off'; }
     async function vtChartTransform(command, payload) {
         const caps = window.feedBack && window.feedBack.capabilities;
         if (!caps || typeof caps.dispatch !== 'function') return null;
@@ -592,15 +681,18 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     hookState.vtRefretTransform = (input) => {
         vtRefreshSoon();
         vtRefretApplied = null;
-        if (!vtRefretEnabled() || vtMode() !== 'auto' || !input) return null;
+        vtRefretBlocked = null;
+        if (!input) return null;
         const info = input.songInfo || {};
         const song = {
             tuning: info.tuning, stringCount: input.stringCount, centOffset: info.centOffset,
             capo: info.capo, isBass: /bass/i.test(String(info.arrangement || '')),
         };
-        if (!virtualTuningNeedsRefret(song, input.allChords || input.chords)) return null;
-        vtRefretApplied = virtualTuningRefretPlan(song);
-        return virtualTuningRefretChart(input, vtRefretApplied);
+        const plan = virtualTuningRefretFor(song, input.allChords || input.chords, vtMode(), vtRefretSetting());
+        if (!plan) return null;
+        if (plan.blocked) { vtRefretBlocked = plan.blocked; return null; }
+        vtRefretApplied = plan;
+        return virtualTuningRefretChart(input, plan);
     };
     // Register once; select it while "match each song" + re-fret are on, and
     // only clear it if it's still the active one (another plugin's transform
@@ -621,7 +713,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             if (!res || res.outcome === 'degraded' || /error|no-owner|no-handler|unsupported/.test(String(res.status))) return;
             hookState.vtRefretRegistered = true;
         }
-        const want = vtRefretEnabled() && vtMode() === 'auto';
+        const want = vtRefretEnabled() && vtMode() !== 0;
         const state = await vtChartTransform('inspect');
         const active = state && state.payload ? state.payload.active : null;
         if (want && active !== VT_REFRET_PROVIDER) {
@@ -631,7 +723,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             await vtChartTransform('clear-provider');
         }
         hookState.vtRefretSelected = want;
-        if (!want) vtRefretApplied = null;
+        if (!want) { vtRefretApplied = null; vtRefretBlocked = null; }
         await vtChartTransform('refresh');
     }
     // ── Player control ───────────────────────────────────────────────────
@@ -647,10 +739,34 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         if (vtShortLabel) return `Tuning ${vtShortLabel}`;
         return mode === 'auto' ? 'Tuning: match song' : `Tuning ${vtFmtSemis(mode)} fixed`;
     }
+    // A line in the player's top-left song info, right under "Tuning: …":
+    // the virtual-tuning setting, its delay and the engine load, always in
+    // view while playing. Click: the Tuning panel. Filled by renderEngineStats.
+    function vtEnsureHudLine() {
+        const anchor = document.getElementById('hud-tuning-targets') || document.getElementById('hud-tuning');
+        if (!anchor || !anchor.parentElement) return;
+        let line = document.getElementById('ae-hud-vt');
+        if (!line) {
+            line = document.createElement('div');
+            line.id = 'ae-hud-vt';
+            line.className = 'text-xs mt-0.5 cursor-pointer text-gray-500 hidden';
+            line.title = 'Virtual tuning (with the delay it adds) and how much of each audio block\'s time '
+                + 'the processing uses (near 100% = crackles). Click for the Tuning panel.';
+            line.onclick = () => vtTogglePanel();
+        }
+        if (anchor.nextElementSibling !== line) anchor.after(line);
+        hookState.engineStatsRender?.();
+    }
     function vtInjectPlayerControl() {
-        const controls = document.getElementById('player-controls');
+        vtEnsureHudLine();
+        // v3: the stable Plugin controls slot (rail popover), first in line so
+        // it stays reachable however many plugins add controls. Older shells:
+        // the control bar, before Close.
+        const slot = window.feedBack?.ui?.playerControlSlot?.() || null;
+        const controls = slot || document.getElementById('player-controls');
         if (!controls || !dropTuneSelect) return;
         let btn = document.getElementById('btn-vt-tuning');
+        if (btn && slot && btn.parentElement !== slot) slot.prepend(btn);
         if (!btn) {
             btn = document.createElement('button');
             btn.id = 'btn-vt-tuning';
@@ -659,8 +775,12 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             btn.style.cssText = 'background:rgba(6,78,59,0.45);color:#6ee7b7;';
             btn.title = 'Virtual tuning for this song';
             btn.onclick = () => vtTogglePanel();
-            const closeBtn = controls.querySelector('button[onclick*="showScreen"]');
-            if (closeBtn) controls.insertBefore(btn, closeBtn); else controls.appendChild(btn);
+            if (slot) {
+                slot.prepend(btn);
+            } else {
+                const closeBtn = controls.querySelector('button[onclick*="showScreen"]');
+                if (closeBtn) controls.insertBefore(btn, closeBtn); else controls.appendChild(btn);
+            }
         }
         vtUpdatePlayerControl();
     }
@@ -673,9 +793,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             if (st) st.textContent = vtStatusText || (vtMode() === 0 ? 'Off: you hear your instrument as you play it.' : '');
             const sel = panel.querySelector('[data-vt="mode"]');
             if (sel && sel.value !== dropTuneSelect.value) sel.value = dropTuneSelect.value;
-            const cb = panel.querySelector('[data-vt="refret"]');
-            if (cb && dropTuneRefretCheckbox) cb.checked = dropTuneRefretCheckbox.checked;
+            const rf = panel.querySelector('[data-vt="refret"]');
+            if (rf && dropTuneRefretSelect && rf.value !== dropTuneRefretSelect.value) rf.value = dropTuneRefretSelect.value;
         }
+        hookState.engineStatsRender?.();      // the HUD line's setting label
     }
     function vtClosePanel() {
         const panel = document.getElementById('ae-vt-panel-float');
@@ -709,28 +830,33 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             dropTuneSelect.dispatchEvent(new Event('change'));
         };
         const label = document.createElement('label');
-        label.className = 'flex items-center gap-2 mt-2';
-        label.style.cursor = 'pointer';
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.dataset.vt = 'refret';
-        cb.checked = dropTuneRefretCheckbox ? dropTuneRefretCheckbox.checked : true;
-        cb.onchange = () => {
-            if (!dropTuneRefretCheckbox) return;
-            dropTuneRefretCheckbox.checked = cb.checked;
-            dropTuneRefretCheckbox.dispatchEvent(new Event('change'));
-        };
+        label.className = 'block mt-2';
         const span = document.createElement('span');
-        span.className = 'text-sm text-slate-300';
-        span.textContent = 'Re-fret drop tunings so chords stay right';
-        label.append(cb, span);
+        span.className = 'block text-xs text-slate-400 mb-1';
+        span.textContent = 'Re-fret the chart';
+        const rf = document.createElement('select');
+        rf.dataset.vt = 'refret';
+        rf.className = 'w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm';
+        rf.innerHTML = dropTuneRefretSelect ? dropTuneRefretSelect.innerHTML : '';   // same options as the Audio screen
+        rf.value = vtRefretSetting();
+        rf.onchange = () => {
+            if (!dropTuneRefretSelect) return;
+            dropTuneRefretSelect.value = rf.value;
+            dropTuneRefretSelect.dispatchEvent(new Event('change'));
+        };
+        label.append(span, rf);
         const status = document.createElement('div');
         status.dataset.vt = 'status';
         status.className = 'text-xs text-emerald-400 mt-2';
-        panel.append(title, sel, label, status);
+        const stats = document.createElement('div');
+        stats.dataset.vt = 'stats';
+        stats.className = 'text-xs text-slate-400 mt-2';
+        stats.title = 'Delay virtual tuning adds, and how much of each audio block\'s time the processing uses (near 100% = crackles).';
+        panel.append(title, sel, label, status, stats);
         player.style.position = 'relative';
         player.appendChild(panel);
         vtUpdatePlayerControl();
+        hookState.engineStatsRender?.();
     }
     hookState.vtLifecycle = { ready: vtRefresh, stopped: vtSongStopped, inject: vtInjectPlayerControl };
     (function installVirtualTuningLifecycle() {
@@ -892,6 +1018,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         }
         if (typeof settings.dropTuneAuto === 'boolean') normalized.dropTuneAuto = settings.dropTuneAuto;
         if (typeof settings.dropTuneRefret === 'boolean') normalized.dropTuneRefret = settings.dropTuneRefret;
+        if (['auto', 'always', 'off'].includes(settings.dropTuneRefretMode)) normalized.dropTuneRefretMode = settings.dropTuneRefretMode;
         if (typeof settings.songFollowsOutput === 'boolean') normalized.songFollowsOutput = settings.songFollowsOutput;
         const savedAt = Number(settings.savedAt);
         if (Number.isFinite(savedAt) && savedAt > 0) normalized.savedAt = savedAt;
@@ -1725,8 +1852,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 try { await api.setMonitorKill?.(saved.monitorKill); }
                 catch (e) { console.warn('[audio-engine] setMonitorKill restore failed:', e); }
             }
-            if (dropTuneRefretCheckbox && typeof saved.dropTuneRefret === 'boolean') {
-                dropTuneRefretCheckbox.checked = saved.dropTuneRefret;
+            if (dropTuneRefretSelect) {
+                // dropTuneRefretMode since 3-way; before: a boolean (on = auto).
+                if (VT_REFRET_MODES.includes(saved.dropTuneRefretMode)) dropTuneRefretSelect.value = saved.dropTuneRefretMode;
+                else if (typeof saved.dropTuneRefret === 'boolean') dropTuneRefretSelect.value = saved.dropTuneRefret ? 'auto' : 'off';
             }
             if (songOutputCheckbox && typeof saved.songFollowsOutput === 'boolean') {
                 songOutputCheckbox.checked = saved.songFollowsOutput;
@@ -2267,6 +2396,173 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // ── Metering ──────────────────────────────────────────────────────────────
     let meterPollInterval = null;
 
+    // ── Engine load + virtual-tuning delay ────────────────────────────────────
+    // ES-PURE-BEGIN — pure helper, loaded by tests/engine-stats.test.js.
+    // Display text for audio.getEngineStats() (null when the addon lacks it).
+    // `recentPeak`: the worst load the caller saw over its last few polls (the
+    // engine reports the worst block since the previous poll). Load is the
+    // busier of the two device callbacks; the output one only runs in split mode.
+    function engineStatsView(st, recentPeak) {
+        const view = { cpu: '', level: 'ok', delay: '', delayShort: '' };
+        if (!st || !st.running) return view;
+        const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+        const load = Math.max(num(st.inputLoad), num(st.outputLoad));
+        const peak = Math.max(load, num(st.inputPeak), num(st.outputPeak), num(recentPeak));
+        // One decimal below 10 %, so a light chain doesn't read as a flat 0 %.
+        const pct = (v) => (v < 0.1 ? `${(v * 100).toFixed(1)}%` : `${Math.round(v * 100)}%`);
+        view.cpu = `CPU ${pct(load)} · peak ${pct(peak)}`;
+        view.level = peak >= 0.8 ? 'high' : peak >= 0.5 ? 'warn' : 'ok';
+        const dt = st.dropTune || {};
+        if (dt.shifting) {
+            view.delayShort = `+${num(dt.averageMs).toFixed(1)} ms`;
+            view.delay = `Virtual tuning ${view.delayShort}`;
+            if (num(dt.plucks) > 0 && num(dt.attackMs) > 0) view.delay += ` (attack ${num(dt.attackMs).toFixed(1)} ms)`;
+        }
+        return view;
+    }
+    // The player HUD line under the song's tuning: the virtual-tuning setting
+    // for this song (`vtLabel`, '' when off) with its delay, and the load.
+    function engineHudText(view, vtLabel, leak) {
+        const parts = [];
+        if (vtLabel) parts.push(`Virtual tuning ${vtLabel}${view && view.delayShort ? ` · ${view.delayShort}` : ''}`);
+        if (view && view.cpu) parts.push(view.cpu);
+        if (leak && leak.text) parts.push(leak.text);
+        return parts.join(' · ');
+    }
+    // A warning when something besides the engine may be playing the raw,
+    // unshifted input while virtual tuning is on: then every note sounds twice
+    // (original + shifted). `nam`: NAM Tone runs its browser (WASM) amp on a
+    // live input stream, so it certainly plays it; `streams`: live raw input
+    // streams opened in the page by anything (a plugin may only analyse them).
+    function vtInputLeakWarning(vtOn, nam, streams) {
+        if (!vtOn) return { level: '', text: '' };
+        if (nam) {
+            return { level: 'high', text: '⚠ NAM Tone plays your input unshifted (browser mode): '
+                + 'you hear every note twice. Settings → NAM Tone → Engine: Desktop Native, or turn NAM Tone off.' };
+        }
+        if (streams > 0) {
+            return { level: 'warn', text: `⚠ ${streams} raw input stream${streams === 1 ? '' : 's'} open in the app `
+                + '(a plugin listening to your instrument directly). If you hear notes twice, that plugin is playing it.' };
+        }
+        return { level: '', text: '' };
+    }
+    // ES-PURE-END
+
+    // Live raw input streams opened in the page (getUserMedia with audio), to
+    // spot a plugin that plays the unshifted input. Wrapped once per page.
+    const vtStreams = hookState.vtStreams || (hookState.vtStreams = new Set());
+    (function trackInputStreams() {
+        const md = navigator.mediaDevices;
+        if (hookState.vtStreamsPatched || !md || typeof md.getUserMedia !== 'function') return;
+        hookState.vtStreamsPatched = true;
+        const original = md.getUserMedia.bind(md);
+        md.getUserMedia = async function (constraints, ...rest) {
+            const stream = await original(constraints, ...rest);
+            try { if (stream && stream.getAudioTracks().length) vtStreams.add(stream); } catch (_) { /* ignore */ }
+            return stream;
+        };
+    })();
+    function vtLiveInputStreams() {
+        let n = 0;
+        for (const st of vtStreams) {
+            const live = st.active && st.getAudioTracks().some((t) => t.readyState === 'live' && t.enabled);
+            if (live) n++; else vtStreams.delete(st);
+        }
+        return n;
+    }
+    // NAM Tone's browser amp. Its state is top-level `let`s in its classic
+    // script (global lexical scope, not window properties), so read them by
+    // name, guarded: absent plugin or a renamed variable → false.
+    function vtNamBrowserAmpActive() {
+        try {
+            // eslint-disable-next-line no-undef
+            return typeof _namNativeMode !== 'undefined' && !_namNativeMode
+                // eslint-disable-next-line no-undef
+                && typeof _namStream !== 'undefined' && !!_namStream && _namStream.active === true;
+        } catch (_) { return false; }
+    }
+    let vtLeakLogged = '';
+    function vtCurrentLeak() {
+        const mode = typeof vtMode === 'function' ? vtMode() : 0;
+        const leak = vtInputLeakWarning(mode !== 0, vtNamBrowserAmpActive(), vtLiveInputStreams());
+        // Once per change into the terminal log too (the renderer console is
+        // forwarded there), so a report can be matched to it afterwards.
+        if (leak.text !== vtLeakLogged) {
+            vtLeakLogged = leak.text;
+            if (leak.text) console.warn('[audio-engine] virtual tuning:', leak.text);
+        }
+        return leak;
+    }
+
+    const engineCpuEl = $('ae-engine-cpu');
+    const engineDelayEl = $('ae-engine-delay');
+    const enginePanelEl = $('audio-engine-panel');
+    const ENGINE_STATS_POLL_MS = 500;
+    const ENGINE_PEAK_POLLS = 6;                  // "peak" covers the last 3 s
+    let engineView = null;
+    function engineStatsVisible() {
+        const hud = document.getElementById('ae-hud-vt');
+        return (enginePanelEl && enginePanelEl.offsetParent !== null)
+            || !!document.getElementById('ae-vt-panel-float')
+            || !!(hud && hud.offsetParent !== null);
+    }
+    function renderEngineStats() {
+        const v = engineView || { cpu: '', level: 'ok', delay: '' };
+        if (engineCpuEl) {
+            engineCpuEl.textContent = v.cpu;
+            engineCpuEl.classList.toggle('hidden', !v.cpu);
+            engineCpuEl.classList.toggle('text-slate-500', v.level === 'ok');
+            engineCpuEl.classList.toggle('text-amber-400', v.level === 'warn');
+            engineCpuEl.classList.toggle('text-red-400', v.level === 'high');
+        }
+        if (engineDelayEl) {
+            engineDelayEl.textContent = v.delay;
+            engineDelayEl.classList.toggle('hidden', !v.delay);
+        }
+        const hud = document.getElementById('ae-hud-vt');
+        if (hud) {
+            const mode = typeof vtMode === 'function' ? vtMode() : 0;
+            const label = mode === 0 ? '' : (vtShortLabel || (mode === 'auto' ? 'match song' : `${vtFmtSemis(mode)} fixed`));
+            const leak = vtCurrentLeak();
+            hud.textContent = engineHudText(v, label, leak);
+            hud.classList.toggle('hidden', !hud.textContent);
+            const level = leak.level === 'high' || v.level === 'high' ? 'high'
+                : leak.level === 'warn' || v.level === 'warn' ? 'warn' : 'ok';
+            hud.classList.toggle('text-gray-500', level === 'ok');
+            hud.classList.toggle('text-amber-400', level === 'warn');
+            hud.classList.toggle('text-red-400', level === 'high');
+        }
+        const panelStats = document.querySelector('#ae-vt-panel-float [data-vt="stats"]');
+        if (panelStats) {
+            panelStats.textContent = [v.delay || (v.cpu ? 'Virtual tuning: not shifting' : ''), v.cpu,
+                vtCurrentLeak().text].filter(Boolean).join(' · ');
+        }
+    }
+    // Callable from the virtual-tuning code above, which can run before this
+    // part of the script has (song events): only once it's defined.
+    hookState.engineStatsRender = renderEngineStats;
+    function startEngineStats() {
+        if (typeof api.getEngineStats !== 'function') return;
+        if (hookState.engineStatsInterval) clearInterval(hookState.engineStatsInterval);
+        const peaks = [];
+        hookState.engineStatsInterval = setInterval(async () => {
+            // Only while someone can see it: the Audio screen, the player's HUD line or panel.
+            if (!engineStatsVisible()) return;
+            if (!audioRunning) {
+                engineView = null;              // the HUD line keeps just the setting
+                renderEngineStats();
+                return;
+            }
+            try {
+                const st = await api.getEngineStats();
+                peaks.push(Math.max(Number(st?.inputPeak) || 0, Number(st?.outputPeak) || 0));
+                if (peaks.length > ENGINE_PEAK_POLLS) peaks.shift();
+                engineView = engineStatsView(st, Math.max(0, ...peaks));
+                renderEngineStats();
+            } catch (_) { /* ignore polling errors */ }
+        }, ENGINE_STATS_POLL_MS);
+    }
+
     function startMetering() {
         // Use setInterval at ~30fps instead of rAF to avoid overwhelming IPC
         if (meterPollInterval) clearInterval(meterPollInterval);
@@ -2315,6 +2611,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 }
             } catch (e) { /* ignore polling errors */ }
         }, 33); // ~30fps
+
+        startEngineStats();
 
         // Latency: poll less frequently
         setInterval(async () => {
@@ -2476,9 +2774,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             await songOutputApply((lastAppliedDeviceSettings && lastAppliedDeviceSettings.output) || outputDeviceSelect.value);
             await saveAppliedDeviceSettings({ songFollowsOutput: songOutputCheckbox.checked });
         });
-        dropTuneRefretCheckbox?.addEventListener('change', async () => {
+        dropTuneRefretSelect?.addEventListener('change', async () => {
             await applyDropTuneSetting();
-            await saveAppliedDeviceSettings({ dropTuneRefret: dropTuneRefretCheckbox.checked });
+            await saveAppliedDeviceSettings({ dropTuneRefretMode: vtRefretSetting(), dropTuneRefret: vtRefretEnabled() });
         });
 
         // Use in-app amp sims (feedBack-desktop#46) — persists the opt-in to core

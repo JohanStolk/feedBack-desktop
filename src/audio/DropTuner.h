@@ -74,12 +74,29 @@ public:
                   const std::vector<double>& noteTimes, const std::vector<float>& noteHz);
     void clearChart();
     // The song position now, pushed by the renderer (~every frame); the audio
-    // thread extrapolates from it while `playing`.
-    void setClock(double songTime, bool playing) noexcept;
+    // thread extrapolates from it while `playing`, at `rate` song seconds per
+    // second (the practice speed; non-finite → 1, clamped to [0.05, 4]).
+    void setClock(double songTime, bool playing, double rate = 1.0) noexcept;
 
     // In-place processing of one mono block. Bypass leaves samples untouched.
     // Returns true if any sample was changed (shifted or crossfading).
     bool process(float* samples, int numSamples) noexcept;
+
+    // The delay the shift adds, for the UI; any thread, in ms. Published once
+    // per processed block from the read head(s):
+    //  - nowMs: this block's mean (0 in dry passthrough);
+    //  - averageMs: ~1 s average while shifting (kept when it stops);
+    //  - attackMs: mean over the first kAttackMs after the latest pluck that
+    //    matched a chart note (chart priming only; 0 = none measured yet);
+    //  - plucks: how many such attacks were measured.
+    struct DelayStats
+    {
+        bool shifting = false;
+        float nowMs = 0.0f, averageMs = 0.0f, attackMs = 0.0f;
+        uint32_t plucks = 0;
+    };
+    DelayStats getDelayStats() const noexcept;
+    static constexpr double kAttackMs = 20.0;
 
     // Diagnostics / tests (audio-thread values; read after process()).
     double getDelaySamples() const noexcept { return delay; }
@@ -133,10 +150,11 @@ private:
 
     std::atomic<double> clockTime { 0.0 };
     std::atomic<bool> clockPlaying { false };
+    std::atomic<double> clockRate { 1.0 };
     std::atomic<uint32_t> clockGen { 0 };
     uint32_t seenClockGen = 0;
     bool haveClock = false, basePlaying = false;
-    double baseTime = 0.0;
+    double baseTime = 0.0, baseRate = 1.0;
     uint64_t baseWritten = 0;
 
     double hint = 0.0;                             // expected period (samples), 0 = none
@@ -155,6 +173,15 @@ private:
     std::vector<float> decimTaps;                  // lowpass FIR, applied every `decim` samples
     std::vector<float> aring;                      // analysis-rate history
     uint64_t amask = 0, aWritten = 0;
+
+    // Delay stats (see getDelayStats): audio-thread accumulators + published values.
+    double avgDelay = 0.0;                         // samples, EMA while shifting
+    bool avgSeeded = false;
+    double attackSum = 0.0;
+    int attackN = 0, attackLen = 1;
+    std::atomic<bool> statShifting { false };
+    std::atomic<float> statNowMs { 0.0f }, statAvgMs { 0.0f }, statAttackMs { 0.0f };
+    std::atomic<uint32_t> statPlucks { 0 };
 
     // YIN workspace (sized in prepare), in analysis samples
     int tauMin = 2, tauMax = 2, frameLen = 4, fftSize = 8;

@@ -184,12 +184,14 @@ Napi::Value SetDropTuneChart(const Napi::CallbackInfo& info)
 
 Napi::Value SetDropTuneClock(const Napi::CallbackInfo& info)
 {
-    // (songTime: number, playing?: boolean). Non-finite times are ignored.
+    // (songTime: number, playing?: boolean, rate?: number). Non-finite times are
+    // ignored; rate (practice speed) defaults to 1, DropTuner clamps it.
     auto liveEngine = snapshotEngine();
     if (liveEngine && info.Length() > 0 && info[0].IsNumber())
     {
         const bool playing = info.Length() > 1 && info[1].IsBoolean() ? info[1].As<Napi::Boolean>().Value() : true;
-        liveEngine->setDropTuneClock(info[0].As<Napi::Number>().DoubleValue(), playing);
+        const double rate = info.Length() > 2 && info[2].IsNumber() ? info[2].As<Napi::Number>().DoubleValue() : 1.0;
+        liveEngine->setDropTuneClock(info[0].As<Napi::Number>().DoubleValue(), playing, rate);
     }
     return info.Env().Undefined();
 }

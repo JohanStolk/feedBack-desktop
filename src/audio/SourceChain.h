@@ -198,7 +198,8 @@ public:
         dropTuner.setChart(shiftTimes, shiftSemis, noteTimes, noteHz);
     }
     void clearDropTuneChart() { dropTuner.clearChart(); }
-    void setDropTuneClock(double songTime, bool playing) { dropTuner.setClock(songTime, playing); }
+    slopsmith::DropTuner::DelayStats getDropTuneDelayStats() const { return dropTuner.getDelayStats(); }
+    void setDropTuneClock(double songTime, bool playing, double rate = 1.0) { dropTuner.setClock(songTime, playing, rate); }
 
     float getInputLevel() const { return currentInputLevel.load(); }
     float getInputPeak() const { return inputPeak.load(); }

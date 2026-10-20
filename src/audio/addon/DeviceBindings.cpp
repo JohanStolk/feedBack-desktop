@@ -890,4 +890,29 @@ Napi::Value GetLatencyBreakdown(const Napi::CallbackInfo& info)
     return obj;
 }
 
+// Live load + virtual-tuning delay (see AudioEngine::EngineStats). Takes the
+// peaks: each call reports the worst block since the previous call.
+Napi::Value GetEngineStats(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto obj = Napi::Object::New(env);
+    auto liveEngine = snapshotEngine();
+    if (!liveEngine) return obj;
+    const auto st = liveEngine->takeEngineStats();
+    obj.Set("running", st.running);
+    obj.Set("duplex", st.duplex);
+    obj.Set("inputLoad", st.inputLoad);
+    obj.Set("inputPeak", st.inputPeak);
+    obj.Set("outputLoad", st.outputLoad);
+    obj.Set("outputPeak", st.outputPeak);
+    auto dt = Napi::Object::New(env);
+    dt.Set("shifting", st.dropTune.shifting);
+    dt.Set("nowMs", st.dropTune.nowMs);
+    dt.Set("averageMs", st.dropTune.averageMs);
+    dt.Set("attackMs", st.dropTune.attackMs);
+    dt.Set("plucks", st.dropTune.plucks);
+    obj.Set("dropTune", dt);
+    return obj;
+}
+
 } // namespace slopsmith::addon
