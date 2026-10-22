@@ -138,13 +138,15 @@ time budget):
 
 | Buffer | M1 Pro | i5-8400T (2018, 6 cores, 35 W) | i5-8400T before the decimated analysis |
 |---|---|---|---|
-| 32 | 6.5 % | 12.5 % | 153 % |
-| 64 | 3.8 % | 6.5 % | 98 % |
-| 128 | – | 4.3 % | 43 % |
-| 256 | – | 3.8 % | 24 % |
+| 32 | 6.7 % | 12.5 % | 153 % |
+| 64 | 4.1 % | 6.5 % | 98 % |
+| 128 | 2.6 % | 4.3 % | 43 % |
+| 256 | 1.5 % | 3.8 % | 24 % |
 
-So the shifter fits at any common buffer size even on a low-end PC; the amp sim
-and the audio driver decide the smallest usable buffer.
+One run per machine (Release builds, 48 kHz, synthetic bass at −6); repeated runs
+on the M1 Pro vary by a few tenths of a percent. So the shifter fits at any common
+buffer size even on a low-end PC; the amp sim and the audio driver decide the
+smallest usable buffer.
 
 ## Limits
 
