@@ -115,8 +115,20 @@ take: 77 %, 4.4 cents). Fixed shifts over the whole ±12 range: 91–96 % in tun
 **Delay.** Real bass take at −6: 12 ms at the pluck and 6 ms to the shifted pitch
 with priming, against 17 ms and 22 ms without. Priming is robust to ±60 ms chart
 jitter and 15–30 % wrong chart notes (91–96 % in tune; no note ever stuck on a
-wrong pitch). In the app: ~6 ms at −1, ~12 ms at −6 at the pluck; the live
-average on a guitar at −1 read about 9–14 ms, the attack about 5 ms.
+wrong pitch).
+
+The shift's delay doesn't depend on the buffer size (`drop_tuner_bench`, second
+table: 30 s of synthetic bass, 55 plucks, identical at 32–512 samples):
+
+| Shift | Mean while shifting | Attack (first 20 ms after a pluck, chart-primed) |
+|---|---|---|
+| −1 | 11.5 ms | 5.2 ms |
+| −6 | 12.4 ms | 7.6 ms |
+
+The total from string to ear is the device latency (one input and one output
+buffer, 1.3–21.3 ms for 32–512 samples at 48 kHz, plus the driver and
+converters) **plus** this. In the app the live average on a guitar at −1 read
+about 9–14 ms and the attack about 5 ms, matching the bench.
 For comparison, forum measurements of hardware pitch pedals: DigiTech Drop
 12–17 ms, Boss XS 13–14 ms, DigiTech Whammy 4 17 ms.
 
