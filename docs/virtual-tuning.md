@@ -133,10 +133,18 @@ metric). Full chords at −6 break down (open C 35 %, strumming 53 %, against ab
 75–80 % for Rubber Band). In a ~2050-song library, 94 % of guitar chords at −5/−6
 are power chords or octaves, which splice cleanly.
 
-**CPU** (`drop_tuner_bench`, worst callback, primed, % of the callback's time
-budget). M1 Pro: 3.8 % at 64 samples, 6.5 % at 32. The i5-8400T mini PC measured
-98 % / 43 % / 24 % at 64 / 128 / 256 **before** the decimated analysis; it hasn't
-been re-measured since (expected to fit at 64 now).
+**CPU** (`drop_tuner_bench`, worst callback (p99.9), primed, % of the callback's
+time budget):
+
+| Buffer | M1 Pro | i5-8400T (2018, 6 cores, 35 W) | i5-8400T before the decimated analysis |
+|---|---|---|---|
+| 32 | 6.5 % | 12.5 % | 153 % |
+| 64 | 3.8 % | 6.5 % | 98 % |
+| 128 | – | 4.3 % | 43 % |
+| 256 | – | 3.8 % | 24 % |
+
+So the shifter fits at any common buffer size even on a low-end PC; the amp sim
+and the audio driver decide the smallest usable buffer.
 
 ## Limits
 
