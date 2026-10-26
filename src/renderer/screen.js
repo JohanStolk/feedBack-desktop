@@ -418,7 +418,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // string is that many octaves away apart from at most VT_OCTAVE_REFRET_MAX
     // frets: { off, add (frets to move each string), octave }. Meshuggah's bass
     // (−11) with +1: octave −1, nothing to move. Their guitar (−11, the B string
-    // −10, all fourths) with +1: octave −1, the B string +1 fret. octave < 0:
+    // −10: the low six of a 7/8-string) with +1: octave −1, the B string +1 fret. octave < 0:
     // the player sounds that many octaves above the record. null without a tuning.
     function virtualTuningFixedFit(song, semis) {
         const d = virtualTuningFixedDiff(song, semis);

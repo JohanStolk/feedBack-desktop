@@ -36,7 +36,8 @@ from the shift fits too: the octave is taken out and only what remains (at most
 2 frets per string) is re-fretted, and the player sounds that many octaves above
 or below the record. Meshuggah's bass (written +1 with `centOffset` −1200, so
 −11) with a fixed +1: same frets, an octave up. Their guitar (−11 with the B
-string −10, all fourths) with +1: an octave up, the B string +1 fret. The status
+string −10: the low six strings of a 7- or 8-string, a normal guitar with extra
+low strings) with +1: an octave up, the B string +1 fret. The status
 names strings the way players do ("B string +1 fret", "A, D, G, B and high E
 strings +2 frets"), counting from the lowest.
 
