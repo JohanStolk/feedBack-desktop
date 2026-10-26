@@ -25,6 +25,7 @@ function loadHelpers() {
         this.virtualTuningRefretChart = virtualTuningRefretChart;
         this.virtualTuningNeedsRefret = virtualTuningNeedsRefret;
         this.virtualTuningFixedRefretPlan = virtualTuningFixedRefretPlan;
+        this.virtualTuningOctaveOffset = virtualTuningOctaveOffset;
         this.virtualTuningRefretFor = virtualTuningRefretFor;`, ctx);
     return ctx;
 }
@@ -41,6 +42,7 @@ const {
     virtualTuningRefretChart: refretChart,
     virtualTuningNeedsRefret: needsRefret,
     virtualTuningFixedRefretPlan: fixedPlan,
+    virtualTuningOctaveOffset: octaveOffset,
     virtualTuningRefretFor: refretFor,
 } = loadHelpers();
 
@@ -357,4 +359,19 @@ test('big shifts warn on their own, with the instrument that fits', () => {
     const chordy = { total: 30, full: 10, split: 0 };
     const both = warning(chordy, [-7, -7, -7, -7, -7, -7]);
     assert.match(both, /^⚠ 7 semitones is a big shift.*⚠ 33% of the chords are full chords/);
+});
+
+test('fixed shift a whole octave from the song: fits as written, no warning', () => {
+    // Meshuggah bass: +1 with centOffset -1200 = -11; a fixed +1 plays it an octave up.
+    const meshuggah = { tuning: [1, 1, 1, 1, 1, 1], stringCount: 5, centOffset: -1200 };
+    assert.equal(octaveOffset(meshuggah, 1), -1);
+    assert.equal(fixedPlan(meshuggah, 1), null, 'same frets: no re-fret, not blocked');
+    assert.equal(octaveOffset(meshuggah, -11), 0, 'exact match is not an octave offset');
+    assert.equal(fixedPlan(meshuggah, -11), null);
+    // E standard at -12: an octave above the shift.
+    assert.equal(octaveOffset({ tuning: [0, 0, 0, 0] }, -12), 1);
+    // Mixed (Drop D an octave down vs +0): not uniform, so normal rules apply.
+    assert.equal(octaveOffset({ tuning: [-14, -12, -12, -12] }, 0), 0);
+    assert.deepEqual(plain(fixedPlan({ tuning: [-14, -12, -12, -12] }, 0)), { blocked: [0, 1, 2, 3] });
+    assert.equal(octaveOffset(null, 1), 0);
 });

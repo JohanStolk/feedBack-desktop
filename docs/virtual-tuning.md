@@ -31,7 +31,10 @@ shape. Auto re-frets a Match-each-song part only when it has chords across the
 dropped string (single-note and bass parts keep per-note shifting and their drop
 fingering). For a fixed shift, Auto re-frets whenever the song's tuning differs
 from the shift. A song tuned lower than a fixed shift can't be re-fretted (frets
-would go below 0), and the status says so.
+would go below 0), and the status says so. A song exactly a whole number of
+octaves from the shift fits as written: same frets, and the player sounds an
+octave higher or lower than the record (Meshuggah's bass, written +1 with
+`centOffset` −1200, played with a fixed +1).
 
 ## Signal path
 

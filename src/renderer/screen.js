@@ -394,7 +394,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // Eb standard at −2: all +1). null when the chart already fits. Frets
     // can't go below 0, so a song tuned higher than the shift on some string
     // returns { blocked: [string indexes] } instead.
-    function virtualTuningFixedRefretPlan(song, semis) {
+    // Per string: the song's offset (plus centOffset) minus a fixed shift, in
+    // whole semitones, and the raw offsets. null when there's no usable tuning.
+    function virtualTuningFixedDiff(song, semis) {
         if (!song || !Array.isArray(song.tuning) || !Number.isFinite(semis)) return null;
         const declared = Number(song.stringCount);
         const sc = Number.isInteger(declared) && declared > 0 ? declared : song.tuning.length;
@@ -406,9 +408,27 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const v = Number(song.tuning[s]);
             off.push(Number.isFinite(v) ? v : 0);
         }
-        const add = off.map((v) => Math.round(v + base - semis) || 0);
-        if (add.every((d) => d === 0)) return null;
-        const blocked = add.map((d, i) => (d < 0 ? i : -1)).filter((i) => i >= 0);
+        return { off, add: off.map((v) => Math.round(v + base - semis) || 0) };
+    }
+
+    // Whole octaves a song lies from a fixed shift when every string is the
+    // same number of octaves off, else 0. −1: the song is an octave below the
+    // shift (Meshuggah's bass at −11 with +1), so the chart's frets are right
+    // and the player sounds an octave higher than the record.
+    function virtualTuningOctaveOffset(song, semis) {
+        const d = virtualTuningFixedDiff(song, semis);
+        if (!d) return 0;
+        const a = d.add[0];
+        return a !== 0 && a % 12 === 0 && d.add.every((x) => x === a) ? a / 12 : 0;
+    }
+
+    function virtualTuningFixedRefretPlan(song, semis) {
+        const d = virtualTuningFixedDiff(song, semis);
+        if (!d) return null;
+        const { off, add } = d;
+        // Fits as written, or a whole number of octaves away (same frets).
+        if (add.every((x) => x === 0) || virtualTuningOctaveOffset(song, semis)) return null;
+        const blocked = add.map((x, i) => (x < 0 ? i : -1)).filter((i) => i >= 0);
         if (blocked.length) return { blocked };
         return { low: semis, add, tuning: off.map((v, i) => v - add[i]) };
     }
@@ -578,7 +598,12 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 chartNote = `⚠ The chart doesn't match this shift (re-fret is Off): string ${strings(off)} play wrong notes. `
                     + 'Set Re-fret to Auto, or use Match each song.';
             } else {
-                chartNote = 'The chart matches this shift.';
+                const oct = virtualTuningOctaveOffset(original, mode);
+                chartNote = oct
+                    ? `The chart fits this shift ${Math.abs(oct)} octave${Math.abs(oct) === 1 ? '' : 's'} apart: `
+                        + `same frets, and you sound ${Math.abs(oct) === 1 ? 'an octave' : `${Math.abs(oct)} octaves`} `
+                        + `${oct < 0 ? 'higher' : 'lower'} than the record.`
+                    : 'The chart matches this shift.';
             }
             vtShortLabel = `${vtFmtSemis(mode)} fixed${fixedPlan ? ' · re-fret' : ''}${fixedWarning || chartWarn ? ' ⚠' : ''}`;
             const fixedText = [`Fixed shift: ${vtFmtSemis(mode)} semitone${Math.abs(mode) === 1 ? '' : 's'} on all strings.`,
