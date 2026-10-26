@@ -26,6 +26,9 @@ function loadHelpers() {
         this.virtualTuningNeedsRefret = virtualTuningNeedsRefret;
         this.virtualTuningFixedRefretPlan = virtualTuningFixedRefretPlan;
         this.virtualTuningOctaveOffset = virtualTuningOctaveOffset;
+        this.virtualTuningStringNames = virtualTuningStringNames;
+        this.virtualTuningJoinStrings = virtualTuningJoinStrings;
+        this.virtualTuningDescribeRefret = virtualTuningDescribeRefret;
         this.virtualTuningRefretFor = virtualTuningRefretFor;`, ctx);
     return ctx;
 }
@@ -43,6 +46,9 @@ const {
     virtualTuningNeedsRefret: needsRefret,
     virtualTuningFixedRefretPlan: fixedPlan,
     virtualTuningOctaveOffset: octaveOffset,
+    virtualTuningStringNames: stringNames,
+    virtualTuningJoinStrings: joinStrings,
+    virtualTuningDescribeRefret: describeRefret,
     virtualTuningRefretFor: refretFor,
 } = loadHelpers();
 
@@ -301,7 +307,7 @@ test('re-fret is only needed where per-note shifting fails: chords across the dr
 
 test('fixed shift re-frets the chart to fit: Drop D and Eb standard at -2', () => {
     const dropD = fixedPlan({ tuning: [-2, 0, 0, 0, 0, 0] }, -2);
-    assert.deepEqual(plain(dropD), { low: -2, add: [0, 2, 2, 2, 2, 2], tuning: [-2, -2, -2, -2, -2, -2] });
+    assert.deepEqual(plain(dropD), { low: -2, add: [0, 2, 2, 2, 2, 2], tuning: [-2, -2, -2, -2, -2, -2], octave: 0 });
     assert.deepEqual(plain(fixedPlan({ tuning: [-1, -1, -1, -1, -1, -1] }, -2)).add, [1, 1, 1, 1, 1, 1]);
     // E standard at -2: everything 2 frets up (the notes stay right).
     assert.deepEqual(plain(fixedPlan({ tuning: [0, 0, 0, 0, 0, 0] }, -2)).add, [2, 2, 2, 2, 2, 2]);
@@ -374,4 +380,33 @@ test('fixed shift a whole octave from the song: fits as written, no warning', ()
     assert.equal(octaveOffset({ tuning: [-14, -12, -12, -12] }, 0), 0);
     assert.deepEqual(plain(fixedPlan({ tuning: [-14, -12, -12, -12] }, 0)), { blocked: [0, 1, 2, 3] });
     assert.equal(octaveOffset(null, 1), 0);
+});
+
+test('octave fit with a small re-fret: Meshuggah guitar (all fourths) with a fixed +1', () => {
+    const isLife = { tuning: [-11, -11, -11, -11, -10, -10] };      // F Bb Eb Ab C# F#
+    assert.equal(octaveOffset(isLife, 1), -1);
+    assert.deepEqual(plain(fixedPlan(isLife, 1)),
+        { low: 1, add: [0, 0, 0, 0, 1, 1], tuning: [-11, -11, -11, -11, -11, -11], octave: -1 });
+    const isDeath = { tuning: [-11, -11, -11, -11, -10, -11] };     // top string as charted (F)
+    assert.deepEqual(plain(fixedPlan(isDeath, 1)).add, [0, 0, 0, 0, 1, 0]);
+    // A big remainder is not an "octave apart": B standard at -2 stays blocked.
+    assert.equal(octaveOffset({ tuning: [-5, -5, -5, -5, -5, -5] }, -2), 0);
+    assert.ok(fixedPlan({ tuning: [-5, -5, -5, -5, -5, -5] }, -2).blocked);
+    // Drop D at -2 is unaffected: no octave involved.
+    assert.equal(plain(fixedPlan({ tuning: [-2, 0, 0, 0, 0, 0] }, -2)).octave, 0);
+});
+
+test('string names, lowest first, and re-fret descriptions players can read', () => {
+    assert.deepEqual(plain(stringNames(6, false)), ['low E', 'A', 'D', 'G', 'B', 'high E']);
+    assert.deepEqual(plain(stringNames(4, true)), ['E', 'A', 'D', 'G']);
+    assert.deepEqual(plain(stringNames(5, true)), ['low B', 'E', 'A', 'D', 'G']);
+    assert.deepEqual(plain(stringNames(7, false))[0], 'low B');
+    const g = stringNames(6, false);
+    assert.equal(joinStrings([4], g), 'B string');
+    assert.equal(joinStrings([1, 2], g), 'A and D strings');
+    assert.equal(describeRefret([0, 2, 2, 2, 2, 2], g), 'A, D, G, B and high E strings +2 frets');
+    assert.equal(describeRefret([0, 0, 0, 0, 1, 1], g), 'B and high E strings +1 fret');
+    assert.equal(describeRefret([0, 0, 0, 0, 1, 0], g), 'B string +1 fret');
+    assert.equal(describeRefret([0, 1, 2, 0], stringNames(4, true)), 'A string +1 fret; D string +2 frets');
+    assert.equal(joinStrings([9], g), '#10 string', 'unknown index falls back to a number');
 });

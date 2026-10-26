@@ -411,26 +411,73 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         return { off, add: off.map((v) => Math.round(v + base - semis) || 0) };
     }
 
-    // Whole octaves a song lies from a fixed shift when every string is the
-    // same number of octaves off, else 0. −1: the song is an octave below the
-    // shift (Meshuggah's bass at −11 with +1), so the chart's frets are right
-    // and the player sounds an octave higher than the record.
-    function virtualTuningOctaveOffset(song, semis) {
+    // Largest per-string remainder an octave fit may re-fret (see below).
+    const VT_OCTAVE_REFRET_MAX = 2;
+
+    // A fixed shift against a song, with whole octaves taken out when every
+    // string is that many octaves away apart from at most VT_OCTAVE_REFRET_MAX
+    // frets: { off, add (frets to move each string), octave }. Meshuggah's bass
+    // (−11) with +1: octave −1, nothing to move. Their guitar (−11, the B string
+    // −10, all fourths) with +1: octave −1, the B string +1 fret. octave < 0:
+    // the player sounds that many octaves above the record. null without a tuning.
+    function virtualTuningFixedFit(song, semis) {
         const d = virtualTuningFixedDiff(song, semis);
-        if (!d) return 0;
-        const a = d.add[0];
-        return a !== 0 && a % 12 === 0 && d.add.every((x) => x === a) ? a / 12 : 0;
+        if (!d) return null;
+        const k = Math.floor(Math.min(...d.add) / 12);
+        const rest = d.add.map((x) => x - 12 * k);
+        if (k !== 0 && Math.max(...rest) <= VT_OCTAVE_REFRET_MAX) return { off: d.off, add: rest, octave: k };
+        return { off: d.off, add: d.add, octave: 0 };
+    }
+
+    // Whole octaves a song lies from a fixed shift (see virtualTuningFixedFit), else 0.
+    function virtualTuningOctaveOffset(song, semis) {
+        const f = virtualTuningFixedFit(song, semis);
+        return f ? f.octave : 0;
     }
 
     function virtualTuningFixedRefretPlan(song, semis) {
-        const d = virtualTuningFixedDiff(song, semis);
-        if (!d) return null;
-        const { off, add } = d;
-        // Fits as written, or a whole number of octaves away (same frets).
-        if (add.every((x) => x === 0) || virtualTuningOctaveOffset(song, semis)) return null;
+        const f = virtualTuningFixedFit(song, semis);
+        if (!f) return null;
+        const { off, add, octave } = f;
+        // Fits as written (maybe whole octaves apart: same frets).
+        if (add.every((x) => x === 0)) return null;
         const blocked = add.map((x, i) => (x < 0 ? i : -1)).filter((i) => i >= 0);
         if (blocked.length) return { blocked };
-        return { low: semis, add, tuning: off.map((v, i) => v - add[i]) };
+        return { low: semis, add, tuning: off.map((v, i) => v - add[i]), octave };
+    }
+
+    // An instrument's strings, lowest first, named the way players say them.
+    function virtualTuningStringNames(count, isBass) {
+        const n = Number(count) || (isBass ? 4 : 6);
+        if (isBass) {
+            if (n >= 6) return ['low B', 'E', 'A', 'D', 'G', 'high C'];
+            if (n === 5) return ['low B', 'E', 'A', 'D', 'G'];
+            return ['E', 'A', 'D', 'G'].slice(0, Math.max(1, n));
+        }
+        if (n >= 8) return ['low F#', 'low B', 'low E', 'A', 'D', 'G', 'B', 'high E'];
+        if (n === 7) return ['low B', 'low E', 'A', 'D', 'G', 'B', 'high E'];
+        return ['low E', 'A', 'D', 'G', 'B', 'high E'].slice(0, Math.max(1, n));
+    }
+
+    // "B string", "A and D strings", "A, D, G, B and high E strings".
+    function virtualTuningJoinStrings(idx, names) {
+        const list = idx.map((i) => names[i] || `#${i + 1}`);
+        if (!list.length) return '';
+        const words = list.length === 1 ? list[0] : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+        return `${words} string${list.length === 1 ? '' : 's'}`;
+    }
+
+    // Per-string fret moves, grouped by amount: "A, D, G, B and high E strings +2 frets".
+    function virtualTuningDescribeRefret(add, names) {
+        const groups = new Map();
+        add.forEach((d, i) => {
+            if (!d) return;
+            if (!groups.has(d)) groups.set(d, []);
+            groups.get(d).push(i);
+        });
+        return [...groups].sort((a, b) => a[0] - b[0])
+            .map(([d, idx]) => `${virtualTuningJoinStrings(idx, names)} ${d > 0 ? '+' : ''}${d} fret${Math.abs(d) === 1 ? '' : 's'}`)
+            .join('; ');
     }
 
     // Which re-fret applies to a part, from the virtual-tuning `mode` ('auto'
@@ -552,8 +599,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const transformed = typeof hw.getChartTransform === 'function' ? hw.getChartTransform() : null;
             const refretPlan = transformed && transformed.id === VT_REFRET_PROVIDER ? vtRefretApplied : null;
             const refretNote = refretPlan
-                ? `Re-fretted for its chords: ${refretPlan.add.map((d, i) => (d ? `string ${i + 1} +${d}` : null))
-                    .filter(Boolean).join(', ')} frets (as shown on the highway).`
+                ? `Re-fretted for its chords: ${virtualTuningDescribeRefret(refretPlan.add,
+                    virtualTuningStringNames(refretPlan.add.length, song.isBass))} (as shown on the highway).`
                 : '';
             const autoText = [magicTuningDescribe(perString), refretNote, warning].filter(Boolean).join(' ');
             vtShortLabel = (refretPlan ? `${vtFmtSemis(perString[0])} · re-fret`
@@ -581,28 +628,31 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const info = hw.getSongInfo?.() || {};
             const original = { ...song, tuning: Array.isArray(info.tuning) ? info.tuning : song.tuning, centOffset: info.centOffset };
             const fit = fixedPlan ? null : virtualTuningFixedRefretPlan(original, mode);
-            const strings = (idx) => idx.map((i) => i + 1).join(', ');
+            const names = virtualTuningStringNames((fixedPlan || fit || {}).add?.length
+                || Number(song.stringCount) || (Array.isArray(song.tuning) ? song.tuning.length : 0), song.isBass);
+            const strings = (idx) => virtualTuningJoinStrings(idx, names);
+            const octaves = (o) => (Math.abs(o) === 1 ? 'an octave' : `${Math.abs(o)} octaves`);
             let chartNote;
             let chartWarn = false;
             if (fixedPlan) {
-                chartNote = `Re-fretted to fit: ${fixedPlan.add.map((d, i) => (d ? `string ${i + 1} ${d > 0 ? '+' : ''}${d}` : null))
-                    .filter(Boolean).join(', ')} frets (as shown on the highway).`;
+                chartNote = `Re-fretted to fit: ${virtualTuningDescribeRefret(fixedPlan.add, names)} (as shown on the highway)`
+                    + (fixedPlan.octave ? `, and you sound ${octaves(fixedPlan.octave)} ${fixedPlan.octave < 0 ? 'higher' : 'lower'} `
+                        + 'than the record.' : '.');
             } else if (fit && fit.blocked) {
                 chartWarn = true;
-                chartNote = `⚠ This song is tuned lower than ${vtFmtSemis(mode)} on string ${strings(fit.blocked)}: `
+                chartNote = `⚠ This song is tuned lower than ${vtFmtSemis(mode)} on the ${strings(fit.blocked)}: `
                     + 're-fretting would need frets below 0, so the chart plays as written and the notes are off. '
                     + 'Use Match each song or a bigger shift.';
             } else if (fit) {
                 chartWarn = true;
                 const off = fit.add.map((d, i) => (d ? i : -1)).filter((i) => i >= 0);
-                chartNote = `⚠ The chart doesn't match this shift (re-fret is Off): string ${strings(off)} play wrong notes. `
+                chartNote = `⚠ The chart doesn't match this shift (re-fret is Off): the ${strings(off)} play wrong notes. `
                     + 'Set Re-fret to Auto, or use Match each song.';
             } else {
                 const oct = virtualTuningOctaveOffset(original, mode);
                 chartNote = oct
                     ? `The chart fits this shift ${Math.abs(oct)} octave${Math.abs(oct) === 1 ? '' : 's'} apart: `
-                        + `same frets, and you sound ${Math.abs(oct) === 1 ? 'an octave' : `${Math.abs(oct)} octaves`} `
-                        + `${oct < 0 ? 'higher' : 'lower'} than the record.`
+                        + `same frets, and you sound ${octaves(oct)} ${oct < 0 ? 'higher' : 'lower'} than the record.`
                     : 'The chart matches this shift.';
             }
             vtShortLabel = `${vtFmtSemis(mode)} fixed${fixedPlan ? ' · re-fret' : ''}${fixedWarning || chartWarn ? ' ⚠' : ''}`;
